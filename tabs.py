@@ -187,14 +187,6 @@ class EditMetadataTab(QWidget):
         self._search_btn.clicked.connect(self._search_internet)
         left.addWidget(self._search_btn)
 
-        self._parse_series_btn = QPushButton("Parse as Series…")
-        self._parse_series_btn.setToolTip(
-            "Detect a series across the selected books:\n"
-            "the shared name → Series, the number → Series #, the rest → Title.\n"
-            "Select 2+ books from the same series, then review before applying.")
-        self._parse_series_btn.clicked.connect(self._parse_series)
-        left.addWidget(self._parse_series_btn)
-
         left.addStretch()
         top.addLayout(left)
 
@@ -240,14 +232,40 @@ class EditMetadataTab(QWidget):
             grid.addWidget(apply_btn, row, 3)
 
             if key == 'title':
+                # "Parse" (single-book title split) with a small ▾ beside it
+                # whose menu holds the batch "Parse as Series…" action.
+                parse_w = QWidget()
+                ph = QHBoxLayout(parse_w)
+                ph.setContentsMargins(0, 0, 0, 0); ph.setSpacing(1)
+
                 parse_btn = QPushButton("Parse")
-                parse_btn.setMaximumWidth(60)
+                parse_btn.setMaximumWidth(54)
                 parse_btn.setToolTip(
-                    "Split series info out of the title.\n"
+                    "Split series info out of THIS book's title.\n"
                     'Understands:  "The Inquisition (Summoner, #2)"\n'
-                    '"Title (Series, Book 2)"  •  "Series #2 - Title"')
+                    '"Title (Series, Book 2)"  •  "Series #2 - Title"\n'
+                    "Use the ▾ for the multi-book 'Parse as Series'.")
                 parse_btn.clicked.connect(self._parse_title)
-                grid.addWidget(parse_btn, row, 4)
+                ph.addWidget(parse_btn)
+
+                parse_menu_btn = QPushButton("▾")
+                parse_menu_btn.setMaximumWidth(22)
+                parse_menu_btn.setToolTip("More parsing options")
+                parse_menu = QMenu(parse_menu_btn)
+                series_act = parse_menu.addAction("Parse as Series…")
+                series_act.setToolTip(
+                    "Detect a series across the selected books:\n"
+                    "the shared name → Series, the number → Series #, the rest → Title.\n"
+                    "Select 2+ books from the same series, then review before applying.")
+                series_act.triggered.connect(self._parse_series)
+                # Pop the menu ourselves so the button keeps its single "▾"
+                # (setMenu would add a second menu-indicator arrow).
+                parse_menu_btn.clicked.connect(
+                    lambda checked=False, b=parse_menu_btn, m=parse_menu:
+                        m.exec(b.mapToGlobal(QPoint(0, b.height()))))
+                ph.addWidget(parse_menu_btn)
+
+                grid.addWidget(parse_w, row, 4)
 
         # Description row (spans full width, no per-field apply)
         desc_lbl = QLabel("Description:"); desc_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop)
