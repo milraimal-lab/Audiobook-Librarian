@@ -239,8 +239,26 @@ class BookTreeWidget(QTreeWidget):
     def apply_filter(self, text):
         self._filter = text.lower(); self._apply_filter()
 
+    # Book fields the filter searches, beyond the node's display text.
+    _SEARCH_FIELDS = ('title', 'author', 'narrator', 'series', 'series_num',
+                      'year', 'publisher', 'genre')
+
+    def _node_matches(self, book_node, terms, *ancestors) -> bool:
+        """True when EVERY search term appears somewhere in the book's
+        metadata (title, author, narrator, series, year, publisher, genre …)
+        or in its ancestor author/series node text. Multi-term = AND."""
+        parts = [book_node.text(0)]
+        parts += [a.text(0) for a in ancestors]
+        d = book_node.data(0, Qt.ItemDataRole.UserRole)
+        if d and d[0] == self.NODE_BOOK:
+            b = self._book_by_id(d[1])
+            if b:
+                parts += [getattr(b, f, '') for f in self._SEARCH_FIELDS]
+        blob = ' '.join(str(p) for p in parts if p).lower()
+        return all(t in blob for t in terms)
+
     def _apply_filter(self):
-        tl = self._filter
+        terms = self._filter.split()          # lowercased in apply_filter()
         root = self.invisibleRootItem()
         for ai in range(root.childCount()):
             anode = root.child(ai); av = False
@@ -248,19 +266,22 @@ class BookTreeWidget(QTreeWidget):
                 child = anode.child(si)
                 d = child.data(0, Qt.ItemDataRole.UserRole)
                 if d and d[0] == self.NODE_BOOK:
-                    vis = not tl or tl in child.text(0).lower()
+                    # direct book under an author (no series) — include the
+                    # author node text so an author search reveals it
+                    vis = not terms or self._node_matches(child, terms, anode)
                     child.setHidden(not vis)
                     if vis: av = True
                 else:
                     sv = False
                     for bi in range(child.childCount()):
                         bnode = child.child(bi)
-                        vis = not tl or tl in bnode.text(0).lower()
+                        vis = (not terms
+                               or self._node_matches(bnode, terms, anode, child))
                         bnode.setHidden(not vis)
                         if vis: sv = True
                     child.setHidden(not sv)
                     if sv: av = True
-            anode.setHidden(not av and bool(tl))
+            anode.setHidden(not av and bool(terms))
 
     def _on_selection_changed(self):
         sel = self.selectedItems()

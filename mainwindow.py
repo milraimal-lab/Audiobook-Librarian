@@ -213,7 +213,11 @@ class MainWindow(QMainWindow):
         lay = QVBoxLayout(w); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(2)
 
         self.search_edit = QLineEdit()
-        self.search_edit.setPlaceholderText("Filter books…")
+        self.search_edit.setPlaceholderText("Filter: title, author, series, narrator…")
+        self.search_edit.setToolTip(
+            "Searches title, author, narrator, series, year, publisher and genre.\n"
+            "Multiple words all have to match — e.g. 'sanderson mistborn'.")
+        self.search_edit.setClearButtonEnabled(True)
         self.search_edit.textChanged.connect(self._filter_books)
         lay.addWidget(self.search_edit)
 
