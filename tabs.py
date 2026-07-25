@@ -30,7 +30,7 @@ from constants import *
 from util import parse_audiobook_title, _sanitize, log_line
 from workers import FieldSaveThread, OrganizeThread
 from dialogs import (RawTagDialog, AddTagDialog, OpenLibraryDialog,
-                     CoverViewDialog, _ClickableLabel)
+                     CoverViewDialog, SeriesParseDialog, _ClickableLabel)
 
 class EditMetadataTab(QWidget):
     """
@@ -186,6 +186,14 @@ class EditMetadataTab(QWidget):
         self._search_btn.setEnabled(False)
         self._search_btn.clicked.connect(self._search_internet)
         left.addWidget(self._search_btn)
+
+        self._parse_series_btn = QPushButton("Parse as Series…")
+        self._parse_series_btn.setToolTip(
+            "Detect a series across the selected books:\n"
+            "the shared name → Series, the number → Series #, the rest → Title.\n"
+            "Select 2+ books from the same series, then review before applying.")
+        self._parse_series_btn.clicked.connect(self._parse_series)
+        left.addWidget(self._parse_series_btn)
 
         left.addStretch()
         top.addLayout(left)
@@ -526,6 +534,38 @@ class EditMetadataTab(QWidget):
         if 'series_num' in parsed and not self._field_edits['series_num'].text():
             self._field_edits['series_num'].setText(parsed['series_num'])
 
+    def _parse_series(self):
+        """Batch-detect a series across the selected books and, after the user
+        reviews the preview, write series / number / title to each and save."""
+        if len(self._books) < 2:
+            QMessageBox.information(self, "Parse as Series",
+                "Select two or more books from the same series first.\n\n"
+                "The series is detected from the name they share — a single "
+                "book has nothing to compare against.")
+            return
+        dlg = SeriesParseDialog(self._books, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        changed = []
+        for book, r in zip(self._books, dlg.get_results()):
+            series = (r.get('series') or '').strip()
+            if not series:
+                continue          # user cleared it → leave this book alone
+            book.series     = series
+            book.series_num = (r.get('series_num') or '').strip()
+            title = (r.get('title') or '').strip()
+            if title:
+                book.title = title
+            book.modified = True
+            changed.append(book)
+        if not changed:
+            self.status_message.emit("Parse as Series — nothing applied.")
+            return
+        self._load_from_book(self._books[0])
+        self.tree_refresh_requested.emit()
+        self.save_books_requested.emit(changed)   # only the books we actually touched
+        self.status_message.emit(f"Parsed series for {len(changed)} book(s) — saved.")
+
     # ── open library ──────────────────────────────────────────────
 
     def _search_internet(self):
@@ -732,6 +772,7 @@ class FilesTab(QWidget):
     merge_requested     = pyqtSignal(list)             # list[sc.Book] to merge
     ops_performed       = pyqtSignal(str, list, bool)  # desc, pairs, is_copy
     build_m4b_requested = pyqtSignal(object)           # list[sc.Book]
+    build_m4b_options_requested = pyqtSignal()          # open the M4B options dialog
     split_requested     = pyqtSignal(list)             # [(book, file_idx), …]
     autosplit_requested = pyqtSignal(object)           # sc.Book → split by album tag
 
@@ -775,11 +816,20 @@ class FilesTab(QWidget):
         self._m4b_btn = QPushButton("Build M4B…")
         self._m4b_btn.setToolTip(
             "Combine each selected book's files into a single .m4b with chapters.\n"
-            "Each file becomes one chapter. Builds run one at a time.\n"
-            "Requires ffmpeg. Originals are untouched.")
+            "Each file becomes one chapter. Several build in parallel.\n"
+            "Requires ffmpeg. Use ⚙ to set where they save and whether to "
+            "recycle the originals.")
         self._m4b_btn.clicked.connect(
             lambda: self.build_m4b_requested.emit(self._displayed_books()))
         hdr.addWidget(self._m4b_btn)
+        self._m4b_opts_btn = QPushButton("⚙")
+        self._m4b_opts_btn.setMaximumWidth(30)
+        self._m4b_opts_btn.setToolTip(
+            "M4B build options — where the .m4b files save, and whether to move "
+            "the originals to the Recycle Bin after building.")
+        self._m4b_opts_btn.clicked.connect(
+            lambda: self.build_m4b_options_requested.emit())
+        hdr.addWidget(self._m4b_opts_btn)
         for lbl2, tip, slot in [
                 ("↑ Up",   "", self._move_up),
                 ("↓ Down", "", self._move_down),

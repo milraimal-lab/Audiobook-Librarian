@@ -96,6 +96,12 @@ def send_to_recycle_bin(paths: list) -> bool:
     res = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op))
     return res == 0 and not op.fAnyOperationsAborted
 
+def _norm_num(num: str) -> str:
+    """Normalise a series index: strip leading zeros on integers ('05'→'5'),
+    leave decimals alone ('18.5')."""
+    num = (num or '').strip()
+    return str(int(num)) if num.isdigit() else num
+
 def parse_audiobook_title(name: str) -> dict:
     name = name.strip(); out = {}
     m = re.match(r'^(.+?)\s*\(([^)]+?),?\s*#(\d+(?:\.\d+)?)\)\s*$', name)
@@ -110,7 +116,102 @@ def parse_audiobook_title(name: str) -> dict:
     if m:
         out['series'] = m.group(1).strip(); out['series_num'] = m.group(2)
         out['title'] = m.group(3).strip(); return out
+    # Series with the number in [brackets]:  "Series [18] Title"  /  "Series [5]"
+    # Limited to 1–3 digit indices so a trailing year like "(2020)" isn't
+    # mistaken for a series number.
+    m = re.match(r'^(.+?)\s*[\[(]\s*#?\s*(\d{1,3}(?:\.\d+)?)\s*[\])]\s*(.*)$', name)
+    if m:
+        out['series'] = m.group(1).strip(); out['series_num'] = _norm_num(m.group(2))
+        rest = m.group(3).strip(' -:–—')
+        out['title'] = rest or f"Book {out['series_num']}"
+        return out
     out['title'] = name; return out
+
+# Number-token finder for series inference. Each alternative captures the
+# numeric value; the alternative NAME (lastgroup) records how strong a signal
+# it is — an explicit [bracket]/#hash/Book N beats a bare trailing number.
+_SERIES_NUM_TOKEN = re.compile(
+    r'[\[(]\s*#?\s*(?P<bracket>\d+(?:\.\d+)?)\s*[\])]'                              # [18] (5) [#3]
+    r'|#\s*(?P<hash>\d+(?:\.\d+)?)'                                                 # #18
+    r'|\b(?:book|bk|vol|volume|part|pt|episode|ep)\s*\.?\s*(?P<word>\d+(?:\.\d+)?)\b'  # Book 18
+    r'|\b(?P<bare>\d+(?:\.\d+)?)\b',                                                # 18
+    re.IGNORECASE)
+
+_TOKEN_RANK = {'bracket': 3, 'hash': 3, 'word': 2, 'bare': 1}
+
+def _series_candidates(name: str) -> list:
+    """Every way `name` could split into (prefix, number, title) at a numeric
+    token, tagged with how strong that token is."""
+    cands = []
+    for m in _SERIES_NUM_TOKEN.finditer(name):
+        kind = m.lastgroup
+        cands.append({'pre':  name[:m.start()].strip(' -:–—,[('),
+                      'num':  m.group(kind),
+                      'post': name[m.end():].strip(' -:–—])'),
+                      'kind': kind})
+    return cands
+
+def parse_series_group(names: list) -> list:
+    """Infer series / number / title for a set of book names by finding the
+    leading name prefix that recurs across two or more of them.
+
+    Returns one dict per input name (aligned by position): a name that splits
+    against a recurring series prefix yields {'series','series_num','title'};
+    one that can't yields {'title': name}. A prefix only a single book has is
+    never treated as a series, so standalone titles are left alone.
+    """
+    from collections import Counter
+
+    names = [(n or '').strip() for n in names]
+
+    # An explicit "(Series, #N)" style name is already unambiguous — trust it.
+    explicit = [parse_audiobook_title(n) if n else {} for n in names]
+    explicit = [p if 'series' in p else None for p in explicit]
+
+    # Count how many names offer each candidate prefix (case-insensitively),
+    # and remember the most common original spelling for nice output.
+    prefix_count  = Counter()   # key -> number of names offering it
+    prefix_casing = {}          # key -> Counter of original spellings
+    def _note(pref):
+        key = pref.casefold()
+        prefix_count[key] += 1
+        prefix_casing.setdefault(key, Counter())[pref] += 1
+
+    for i, n in enumerate(names):
+        if explicit[i]:
+            _note(explicit[i]['series']); continue
+        for key in {c['pre'].casefold(): c['pre'] for c in _series_candidates(n)
+                    if c['pre']}.values():
+            _note(key)
+
+    results = []
+    for i, n in enumerate(names):
+        if explicit[i]:
+            num = _norm_num(explicit[i].get('series_num', ''))
+            results.append({'series':     explicit[i]['series'],
+                            'series_num': num,
+                            'title':      explicit[i].get('title') or f"Book {num}"})
+            continue
+
+        best = best_score = None
+        for c in _series_candidates(n):
+            count = prefix_count.get(c['pre'].casefold(), 0)
+            if count < 2:               # a prefix only this book has isn't a series
+                continue
+            year_like = bool(re.fullmatch(r'(?:19|20)\d\d', c['num']))
+            score = (count, 0 if year_like else 1, _TOKEN_RANK[c['kind']], len(c['pre']))
+            if best is None or score > best_score:
+                best, best_score = c, score
+
+        if best:
+            num = _norm_num(best['num'])
+            series = prefix_casing[best['pre'].casefold()].most_common(1)[0][0]
+            results.append({'series':     series,
+                            'series_num': num,
+                            'title':      best['post'] or f"Book {num}"})
+        else:
+            results.append({'title': n})
+    return results
 
 def _sanitize(name: str) -> str:
     return re.sub(r'[<>:"/\\|?*]', '_', name).strip('. ') or 'Unknown'

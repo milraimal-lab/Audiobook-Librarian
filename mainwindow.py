@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
     QDialog, QTableWidget, QTableWidgetItem, QHeaderView, QProgressBar,
     QStatusBar, QFrame, QCheckBox, QMenu, QAbstractItemView,
     QToolBar, QTreeWidget, QTreeWidgetItem, QSizePolicy, QTabWidget,
-    QComboBox, QSpinBox, QGridLayout, QInputDialog,
+    QComboBox, QSpinBox, QGridLayout, QInputDialog, QListWidget, QListWidgetItem,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize, QMimeData, QByteArray, QPoint, QTimer
 from PyQt6.QtGui  import QPixmap, QAction, QColor, QDrag, QFont, QCursor, QPainter, QPen
@@ -31,7 +31,7 @@ from util import (_load_settings, _save_settings, log_line, LOG_PATH,
 from workers import (ScanThread, HydrateThread, SaveThread, DupCheckThread,
                      OrganizeThread, M4bThread)
 from booktree import BookTreeWidget, _book_misplacement
-from dialogs import ProblemsDialog, DupResultsDialog, ImportSettingsDialog
+from dialogs import ProblemsDialog, DupResultsDialog, ImportSettingsDialog, M4bBuildDialog
 from tabs import EditMetadataTab, FilesTab, MoveOrganiseTab
 
 class MainWindow(QMainWindow):
@@ -44,17 +44,24 @@ class MainWindow(QMainWindow):
         self.last_folder:   str              = settings.get('library_folder', '')
         self.import_folder: str              = settings.get('import_folder', '')
         self.import_enabled: bool            = bool(settings.get('import_enabled', False))
+        # Remembered M4B build options
+        self._m4b_pref_ask:     bool = bool(settings.get('m4b_ask', True))
+        self._m4b_pref_recycle: bool = bool(settings.get('m4b_recycle', False))
+        self._m4b_pref_own:     bool = bool(settings.get('m4b_own_folder', True))
+        self._m4b_pref_folder:  str  = settings.get('m4b_folder', '') or ''
         self._scan_thread:  Optional[ScanThread]     = None
         self._import_scan_thread: Optional[ScanThread] = None
         self._save_thread:  Optional[SaveThread]     = None
         self._org_thread:   Optional[OrganizeThread] = None
-        self._m4b_threads:  dict                     = {}   # M4bThread -> (book, out_path)
+        self._m4b_threads:  dict                     = {}   # M4bThread -> (book, out_path, recycle)
         self._m4b_frac:     dict                     = {}   # M4bThread -> float 0..1 progress
         self._m4b_msg:      dict                     = {}   # M4bThread -> latest status text
-        self._m4b_queue:    list                     = []   # [(book, out_path)] pending
+        self._m4b_queue:    list                     = []   # [(book, out_path, recycle)] pending
         self._m4b_results:  list                     = []
         self._m4b_total:    int                      = 0
         self._m4b_done:     int                      = 0    # finished (ok or failed)
+        self._m4b_recycled: int                      = 0    # source files recycled
+        self._activity_rows: dict                    = {}   # key -> live QListWidgetItem
         self._hydrate_threads: list = []
         self._dup_thread:   Optional[QThread]        = None
         self._author_scan_thread: Optional[ScanThread] = None
@@ -76,10 +83,17 @@ class MainWindow(QMainWindow):
         self._build_toolbar()
         central = QWidget(); self.setCentralWidget(central)
         rl = QVBoxLayout(central); rl.setContentsMargins(4, 4, 4, 4)
-        ms = QSplitter(Qt.Orientation.Horizontal); rl.addWidget(ms)
+        ms = QSplitter(Qt.Orientation.Horizontal)
         ms.addWidget(self._build_left_panel())
         ms.addWidget(self._build_right_panel())
         ms.setSizes([300, 1100])
+        # Main area on top, activity feed below — draggable divider so the feed
+        # can be grown or shrunk to taste.
+        outer = QSplitter(Qt.Orientation.Vertical); rl.addWidget(outer)
+        outer.addWidget(ms)
+        outer.addWidget(self._build_activity_feed())
+        outer.setStretchFactor(0, 1); outer.setStretchFactor(1, 0)
+        outer.setSizes([900, 120])
         self.status_bar = QStatusBar(); self.setStatusBar(self.status_bar)
         self.unsaved_lbl = QLabel("")
         self.unsaved_lbl.setStyleSheet(f"color:{YELLOW}; font-weight:bold; padding:0 8px;")
@@ -87,6 +101,67 @@ class MainWindow(QMainWindow):
         self.prog_bar = QProgressBar(); self.prog_bar.setMaximumWidth(220)
         self.prog_bar.setVisible(False)
         self.status_bar.addPermanentWidget(self.prog_bar)
+
+    def _build_activity_feed(self):
+        """A scrolling list at the bottom that shows several things at once:
+        each long-running job (every parallel M4B build, a scan, a save) keeps
+        its own live line, and finished events pile up as history."""
+        box = QWidget()
+        v = QVBoxLayout(box); v.setContentsMargins(0, 2, 0, 0); v.setSpacing(2)
+        hdr = QHBoxLayout()
+        lbl = QLabel("Activity"); lbl.setStyleSheet(f"color:{GRAY}; font-size:10px; font-weight:bold;")
+        clear = QPushButton("Clear"); clear.setMaximumWidth(60)
+        clear.setStyleSheet("font-size:10px; padding:1px 6px;")
+        clear.clicked.connect(self._clear_activity)
+        hdr.addWidget(lbl); hdr.addStretch(); hdr.addWidget(clear)
+        v.addLayout(hdr)
+        self.activity = QListWidget()
+        self.activity.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.activity.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.activity.setStyleSheet(
+            "QListWidget { background:#181825; border:1px solid #313244;"
+            " border-radius:4px; font-family:Consolas,'Courier New',monospace;"
+            " font-size:11px; color:#a6adc8; }"
+            " QListWidget::item { padding:1px 4px; }")
+        v.addWidget(self.activity)
+        return box
+
+    def _clear_activity(self):
+        self.activity.clear(); self._activity_rows.clear()
+
+    def _activity(self, msg, key=None):
+        """Add a line to the activity feed. With a `key`, update that operation's
+        existing line in place (live progress replaces itself); without one,
+        append a fresh line. Distinct keys → distinct rows, so concurrent jobs
+        are all visible at the same time."""
+        if not hasattr(self, 'activity'):
+            return                       # a status set before the UI is built
+        from datetime import datetime
+        text = f"{datetime.now():%H:%M:%S}  {msg}"
+        item = self._activity_rows.get(key) if key is not None else None
+        if item is not None:
+            item.setText(text)
+        else:
+            item = QListWidgetItem(text)
+            if key is not None:
+                self._activity_rows[key] = item
+            self.activity.addItem(item)
+            while self.activity.count() > 250:          # cap history
+                old = self.activity.takeItem(0)
+                for k, v in list(self._activity_rows.items()):
+                    if v is old: del self._activity_rows[k]
+        self.activity.scrollToBottom()
+
+    def _activity_done(self, key, msg):
+        """Finalise a keyed row (set its text) and release the key so it stays
+        as history and the next job with that key starts a fresh line."""
+        item = self._activity_rows.pop(key, None)
+        if item is not None:
+            from datetime import datetime
+            item.setText(f"{datetime.now():%H:%M:%S}  {msg}")
+            self.activity.scrollToBottom()
+        else:
+            self._activity(msg)
 
     def _build_toolbar(self):
         tb = QToolBar(); tb.setMovable(False); self.addToolBar(tb)
@@ -260,6 +335,7 @@ class MainWindow(QMainWindow):
         self.files_tab.merge_requested.connect(self._merge_books)
         self.files_tab.ops_performed.connect(self._log_op)
         self.files_tab.build_m4b_requested.connect(self._build_m4b)
+        self.files_tab.build_m4b_options_requested.connect(self._configure_m4b)
         self.files_tab.split_requested.connect(self._split_files_to_new_book)
         self.files_tab.autosplit_requested.connect(self._autosplit_book)
         self.tabs.addTab(self.files_tab, "Files")
@@ -676,11 +752,18 @@ class MainWindow(QMainWindow):
             self._suppress_cross_clear = False
 
     def _persist_settings(self):
-        _save_settings({
+        # Merge onto whatever's on disk so unrelated keys aren't clobbered.
+        data = _load_settings()
+        data.update({
             'library_folder': self.last_folder,
             'import_folder':  self.import_folder,
             'import_enabled': self.import_enabled,
+            'm4b_ask':        self._m4b_pref_ask,
+            'm4b_recycle':    self._m4b_pref_recycle,
+            'm4b_own_folder': self._m4b_pref_own,
+            'm4b_folder':     self._m4b_pref_folder,
         })
+        _save_settings(data)
 
     def _start_hydration(self, books):
         t = HydrateThread(books)
@@ -941,6 +1024,40 @@ class MainWindow(QMainWindow):
         self._set_status(
             f"Auto-split into {len(groups)} books ✓ — check them, then Save All Tags.")
 
+    def _show_m4b_options(self, ok_label: str) -> bool:
+        """Open the M4B options dialog, persist any changes. Returns True on OK."""
+        dlg = M4bBuildDialog(self._m4b_pref_own, self._m4b_pref_folder,
+                             self._m4b_pref_recycle, remember=not self._m4b_pref_ask,
+                             ok_label=ok_label, parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return False
+        own, folder, recycle, remember = dlg.get()
+        self._m4b_pref_own     = own
+        self._m4b_pref_folder  = folder
+        self._m4b_pref_recycle = recycle
+        self._m4b_pref_ask     = not remember
+        self._persist_settings()
+        return True
+
+    def _decide_m4b_settings(self):
+        """Return (own_folder, folder, recycle) for this build, or None if the
+        user cancels. Uses the remembered settings when 'don't ask again' is set
+        and still valid; otherwise pops the options dialog."""
+        stale_folder = (not self._m4b_pref_own
+                        and (not self._m4b_pref_folder
+                             or not Path(self._m4b_pref_folder).exists()))
+        if not self._m4b_pref_ask and not stale_folder:
+            return (self._m4b_pref_own, self._m4b_pref_folder, self._m4b_pref_recycle)
+        if not self._show_m4b_options("Build"):
+            return None
+        return (self._m4b_pref_own, self._m4b_pref_folder, self._m4b_pref_recycle)
+
+    def _configure_m4b(self):
+        """The ⚙ button: reopen the options dialog to change/reset settings."""
+        if self._show_m4b_options("Save Settings"):
+            state = "will ask each build" if self._m4b_pref_ask else "saved (won't ask again)"
+            self._set_status(f"M4B build options {state}.")
+
     def _build_m4b(self, books):
         """Queue one or more books for M4B conversion. Up to M4B_MAX_PARALLEL
         builds run at once; the progress bar tracks the batch as a whole."""
@@ -958,24 +1075,17 @@ class MainWindow(QMainWindow):
                 "winget install ffmpeg\nthen restart this app.")
             return
 
+        # Where to save + whether to recycle originals — from remembered
+        # settings, or by asking (first time, or if a saved folder has gone).
+        decided = self._decide_m4b_settings()
+        if decided is None: return
+        own, folder, recycle = decided
+
         jobs = []
-        if len(books) == 1:
-            book = books[0]
-            default_name = org.sanitize(book.title or book.display_name) + ".m4b"
-            default_path = str(book.files[0].path.parent / default_name)
-            out, _ = QFileDialog.getSaveFileName(self, "Save M4B As", default_path,
-                                                 "M4B Audiobook (*.m4b)")
-            if not out: return
-            jobs.append((book, Path(out)))
-        else:
-            # One folder choice for the batch instead of N save dialogs
-            start = str(books[0].files[0].path.parent)
-            folder = QFileDialog.getExistingDirectory(
-                self, f"Choose output folder for {len(books)} M4B files", start)
-            if not folder: return
-            for b in books:
-                name = org.sanitize(b.title or b.display_name) + ".m4b"
-                jobs.append((b, Path(folder) / name))
+        for b in books:
+            name    = org.sanitize(b.title or b.display_name) + ".m4b"
+            out_dir = b.files[0].path.parent if own else Path(folder)
+            jobs.append((b, out_dir / name))
 
         # Never let an output clobber one of its own sources
         safe, bad = [], []
@@ -993,13 +1103,14 @@ class MainWindow(QMainWindow):
         # Every job must target a distinct output path: parallel builds writing
         # the same file at once would corrupt it. Dedupe against jobs already in
         # flight / queued and within this batch, suffixing " (2)", " (3)"…
-        busy = {op for (_, op) in self._m4b_threads.values()}
-        busy |= {op for (_, op) in self._m4b_queue}
+        # Each job carries its own recycle flag so mixed queued batches stay right.
+        busy = {v[1] for v in self._m4b_threads.values()}
+        busy |= {j[1] for j in self._m4b_queue}
         deduped = []
         for book, out_path in safe:
             out_path = self._unique_m4b_path(out_path, busy)
             busy.add(out_path)
-            deduped.append((book, out_path))
+            deduped.append((book, out_path, recycle))
         safe = deduped
 
         if self._m4b_threads or self._m4b_queue:
@@ -1014,6 +1125,7 @@ class MainWindow(QMainWindow):
         self._m4b_queue = list(safe)
         self._m4b_total = len(safe)
         self._m4b_done  = 0
+        self._m4b_recycled = 0
         self._m4b_results = []
         self.prog_bar.setRange(0, 100); self.prog_bar.setValue(0)
         self.prog_bar.setVisible(True)
@@ -1036,11 +1148,12 @@ class MainWindow(QMainWindow):
         """Start queued builds until M4B_MAX_PARALLEL are running. When nothing
         is left running or waiting, close out the batch."""
         while self._m4b_queue and len(self._m4b_threads) < M4B_MAX_PARALLEL:
-            book, out_path = self._m4b_queue.pop(0)
+            book, out_path, recycle = self._m4b_queue.pop(0)
             t = M4bThread(book, out_path, find_ffmpeg())
-            self._m4b_threads[t] = (book, out_path)
+            self._m4b_threads[t] = (book, out_path, recycle)
             self._m4b_frac[t]    = 0.0
             self._m4b_msg[t]     = f"Building {out_path.name}…"
+            self._activity(f"Building {out_path.name}…  0%", key=f"m4b:{out_path.name}")
             t.progress.connect(self._on_m4b_progress)
             t.finished.connect(self._on_m4b_done)
             t.error.connect(self._on_m4b_error)
@@ -1071,13 +1184,16 @@ class MainWindow(QMainWindow):
         if t in self._m4b_frac and tot > 0:
             self._m4b_frac[t] = min(cur / tot, 1.0)
             self._m4b_msg[t]  = msg
+            name = self._m4b_threads[t][1].name
+            pct  = int(min(cur / tot, 1.0) * 100)
+            self._activity(f"Building {name}…  {pct}%", key=f"m4b:{name}")
         self._update_m4b_status()
 
     def _on_m4b_done(self, out_path: str):
         t = self.sender()
         job = self._m4b_threads.get(t)
         if job is not None:
-            book = job[0]
+            book, opath, recycle = job
             # Tag the new file with the book's metadata + cover
             try:
                 tg.write_tags(Path(out_path), dict(
@@ -1093,16 +1209,43 @@ class MainWindow(QMainWindow):
                 note = f"  (tagging failed: {e})"
             log_line(f"[m4b] built {out_path} from {book.file_count} file(s){note}")
             self._m4b_results.append((True, book.display_name, out_path + note))
+            self._activity_done(f"m4b:{opath.name}", f"✓ Built {opath.name}{note}")
+            if recycle:
+                self._recycle_sources(book, opath)
         self._retire_m4b_thread(t)
 
     def _on_m4b_error(self, msg: str):
         t = self.sender()
         job = self._m4b_threads.get(t)
         if job is not None:
-            book, out_path = job
+            book, out_path, recycle = job
             log_line(f"[m4b] FAILED {out_path}: {msg}")
             self._m4b_results.append((False, book.display_name, msg))
+            self._activity_done(f"m4b:{out_path.name}", f"✗ Failed {out_path.name} — {msg}")
         self._retire_m4b_thread(t)   # one failure shouldn't stall the queue
+
+    def _recycle_sources(self, book, out_path: Path):
+        """Move a built book's source files to the Recycle Bin — but only after
+        confirming the new .m4b really exists and isn't empty, and never the
+        .m4b itself. A recycle failure is reported, never fatal."""
+        try:
+            good = out_path.exists() and out_path.stat().st_size > 0
+        except OSError:
+            good = False
+        if not good:
+            self._activity(f"⚠ Kept originals of {book.display_name} — build output missing/empty")
+            return
+        srcs = [af.path for af in book.files
+                if af.path != out_path and af.path.exists()]
+        if not srcs:
+            return
+        if send_to_recycle_bin(srcs):
+            self._m4b_recycled += len(srcs)
+            log_line(f"[m4b] recycled {len(srcs)} source file(s) of {book.display_name}")
+            self._activity(f"♻ Recycled {len(srcs)} original(s) of {book.display_name}")
+        else:
+            log_line(f"[m4b] FAILED to recycle sources of {book.display_name}")
+            self._activity(f"⚠ Couldn't recycle originals of {book.display_name}")
 
     def _retire_m4b_thread(self, t):
         """Reap a finished thread, then start the next queued build. Waiting
@@ -1124,15 +1267,18 @@ class MainWindow(QMainWindow):
         self._m4b_msg.clear()
         self.prog_bar.setVisible(False)
         results, self._m4b_results = self._m4b_results, []
+        recycled, self._m4b_recycled = self._m4b_recycled, 0
         self._m4b_total = 0
         self._m4b_done  = 0
         if not results: return
         ok = [r for r in results if r[0]]
         bad = [r for r in results if not r[0]]
+        originals = (f"{recycled} original file(s) moved to the Recycle Bin."
+                     if recycled else "Originals are untouched.")
         if len(results) == 1 and ok:
             QMessageBox.information(self, "M4B Built",
                 f"Created:\n{ok[0][2]}\n\n"
-                "Each source file became a chapter. Originals are untouched.\n"
+                f"Each source file became a chapter. {originals}\n"
                 "Rescan (F5) to see it in the tree.")
         else:
             lines = [f"✔ {name}" for _, name, _ in ok[:12]]
@@ -1142,7 +1288,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "M4B Batch Finished",
                 f"Built {len(ok)} of {len(results)} M4B file(s).\n\n"
                 + "\n".join(lines)
-                + "\n\nOriginals are untouched. Rescan (F5) to see them.")
+                + f"\n\n{originals} Rescan (F5) to see them.")
         self._set_status(
             f"M4B batch finished — {len(ok)} built"
             + (f", {len(bad)} failed" if bad else "") + " ✓")
@@ -1588,11 +1734,12 @@ class MainWindow(QMainWindow):
 
     def _set_status(self, msg, log=True):
         # Transient progress ticks (scan/save/organize/M4B) pass log=False so
-        # they don't flood the persistent log — only meaningful one-shot events
-        # are recorded there. The important build events log separately.
+        # they don't flood the persistent log or the activity feed — only
+        # meaningful one-shot events land there. Those events log separately.
         self.status_bar.showMessage(msg)
         if log:
             log_line(msg)
+            self._activity(msg)
 
     def _open_log(self):
         try:

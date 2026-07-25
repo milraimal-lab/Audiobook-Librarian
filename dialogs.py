@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
     QDialog, QTableWidget, QTableWidgetItem, QHeaderView, QProgressBar,
     QStatusBar, QFrame, QCheckBox, QMenu, QAbstractItemView,
     QToolBar, QTreeWidget, QTreeWidgetItem, QSizePolicy, QTabWidget,
-    QComboBox, QSpinBox, QGridLayout, QInputDialog,
+    QComboBox, QSpinBox, QGridLayout, QInputDialog, QRadioButton,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize, QMimeData, QByteArray, QPoint, QTimer
 from PyQt6.QtGui  import QPixmap, QAction, QColor, QDrag, QFont, QCursor, QPainter, QPen
@@ -26,7 +26,8 @@ import audible as au
 import organizer as org
 
 from constants import *
-from util import _suggest_fix, find_ffmpeg, log_line, fmt_size, fmt_duration
+from util import (_suggest_fix, find_ffmpeg, log_line, fmt_size, fmt_duration,
+                  parse_series_group)
 from workers import SearchThread, CoverFetchThread, RepairThread
 
 class _ClickableLabel(QLabel):
@@ -703,3 +704,156 @@ class AddTagDialog(QDialog):
 
     def get(self) -> tuple:
         return self.tag_edit.text().strip(), self.value_edit.text().strip()
+
+class M4bBuildDialog(QDialog):
+    """Where built M4Bs are saved, whether the source files are recycled after
+    a clean build, and whether to remember the answer so it stops asking."""
+
+    def __init__(self, own_folder=True, folder='', recycle=False,
+                 remember=False, ok_label="Build", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Build M4B — Options")
+        self.setMinimumWidth(540)
+        self._build_ui(own_folder, folder, recycle, remember, ok_label)
+
+    def _build_ui(self, own_folder, folder, recycle, remember, ok_label):
+        lay = QVBoxLayout(self)
+
+        q = QLabel("Where should the .m4b files be saved?")
+        q.setStyleSheet("font-weight:bold;")
+        lay.addWidget(q)
+
+        self._own_rb = QRadioButton("In each book's own folder  (next to its source files)")
+        self._one_rb = QRadioButton("All in one folder:")
+        self._own_rb.setChecked(own_folder)
+        self._one_rb.setChecked(not own_folder)
+        lay.addWidget(self._own_rb)
+
+        row = QHBoxLayout()
+        row.addWidget(self._one_rb)
+        self._folder_edit = QLineEdit(folder)
+        self._folder_edit.setPlaceholderText("Choose a folder…")
+        browse = QPushButton("Browse…"); browse.clicked.connect(self._browse)
+        row.addWidget(self._folder_edit, 1); row.addWidget(browse)
+        lay.addLayout(row)
+        self._own_rb.toggled.connect(self._sync_enabled)
+        self._sync_enabled()
+
+        sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("color:#313244;"); lay.addWidget(sep)
+
+        self._recycle_cb = QCheckBox("Move each book's source files to the Recycle Bin after it builds")
+        self._recycle_cb.setChecked(recycle)
+        self._recycle_cb.setToolTip(
+            "Only files that build without error are removed. The new .m4b is "
+            "always kept, and files go to the Recycle Bin so they're restorable.")
+        lay.addWidget(self._recycle_cb)
+
+        self._remember_cb = QCheckBox("Remember these settings and don't ask again")
+        self._remember_cb.setChecked(remember)
+        self._remember_cb.setToolTip(
+            "Future builds use these settings silently. Reopen this dialog any "
+            "time with the ⚙ button next to Build M4B.")
+        lay.addWidget(self._remember_cb)
+
+        br = QHBoxLayout(); br.addStretch()
+        cancel = QPushButton("Cancel"); cancel.clicked.connect(self.reject)
+        ok = QPushButton(ok_label); ok.setStyleSheet(BTN_PRIMARY)
+        ok.clicked.connect(self._on_ok)
+        br.addWidget(cancel); br.addWidget(ok)
+        lay.addLayout(br)
+
+    def _sync_enabled(self):
+        self._folder_edit.setEnabled(self._one_rb.isChecked())
+
+    def _browse(self):
+        d = QFileDialog.getExistingDirectory(self, "Choose output folder",
+                                             self._folder_edit.text().strip() or "")
+        if d:
+            self._folder_edit.setText(d); self._one_rb.setChecked(True)
+
+    def _on_ok(self):
+        if self._one_rb.isChecked() and not self._folder_edit.text().strip():
+            QMessageBox.warning(self, "No Folder",
+                "Pick a folder, or choose “each book's own folder”.")
+            return
+        self.accept()
+
+    def get(self) -> tuple:
+        """(own_folder: bool, folder: str, recycle: bool, remember: bool)"""
+        return (self._own_rb.isChecked(), self._folder_edit.text().strip(),
+                self._recycle_cb.isChecked(), self._remember_cb.isChecked())
+
+class SeriesParseDialog(QDialog):
+    """Batch 'Parse as Series': infer series / number / title for a set of
+    books from their shared name prefix, then preview and edit before applying.
+    """
+
+    def __init__(self, books, parent=None):
+        super().__init__(parent)
+        self.books = list(books)
+        self.setWindowTitle("Parse as Series")
+        self.setMinimumSize(780, 460)
+        self._results: list = []
+        self._build_ui()
+
+    def _build_ui(self):
+        lay = QVBoxLayout(self)
+
+        tip = QLabel(
+            "Books that share a leading name are treated as one series: the "
+            "shared part becomes the Series, the number becomes the Series #, "
+            "and whatever's left becomes the Title.\n"
+            "Every cell is editable — fix anything the guesser got wrong. "
+            "Clear a row's Series cell to leave that book untouched.")
+        tip.setStyleSheet(f"color:{GRAY}; font-size:11px;"); tip.setWordWrap(True)
+        lay.addWidget(tip)
+
+        names  = [b.title or b.display_name for b in self.books]
+        parsed = parse_series_group(names)
+
+        self.table = QTableWidget(len(self.books), 4)
+        self.table.setHorizontalHeaderLabels(["Book (original)", "Series", "#", "Title"])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.AllEditTriggers)
+        hh = self.table.horizontalHeader()
+        hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        hh.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        hh.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        hh.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+
+        for row, (name, p) in enumerate(zip(names, parsed)):
+            orig = QTableWidgetItem(name)
+            orig.setFlags(orig.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            orig.setForeground(QColor(GRAY))
+            self.table.setItem(row, 0, orig)
+            self.table.setItem(row, 1, QTableWidgetItem(p.get('series', '')))
+            self.table.setItem(row, 2, QTableWidgetItem(p.get('series_num', '')))
+            self.table.setItem(row, 3, QTableWidgetItem(p.get('title', name)))
+        lay.addWidget(self.table)
+
+        detected = sum(1 for p in parsed if p.get('series'))
+        info = QLabel(f"Detected a series for {detected} of {len(self.books)} book(s).")
+        info.setStyleSheet(f"color:{BLUE}; font-size:11px;")
+        lay.addWidget(info)
+
+        br = QHBoxLayout(); br.addStretch()
+        cancel = QPushButton("Cancel"); cancel.clicked.connect(self.reject)
+        ok = QPushButton(f"Apply to {len(self.books)} Book(s)")
+        ok.setStyleSheet(BTN_PRIMARY); ok.clicked.connect(self._on_apply)
+        br.addWidget(cancel); br.addWidget(ok)
+        lay.addLayout(br)
+
+    def _on_apply(self):
+        self._results = []
+        for row in range(self.table.rowCount()):
+            self._results.append({
+                'series':     self.table.item(row, 1).text().strip(),
+                'series_num': self.table.item(row, 2).text().strip(),
+                'title':      self.table.item(row, 3).text().strip(),
+            })
+        self.accept()
+
+    def get_results(self) -> list:
+        """List aligned with `books`: {'series','series_num','title'} per row."""
+        return self._results
