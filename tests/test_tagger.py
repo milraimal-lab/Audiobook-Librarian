@@ -95,6 +95,17 @@ def test_partial_write_touches_only_that_field(mp3):
     assert got['series_num'] == '7'
     assert got['title'] == FIELDS['title']      # untouched
 
+@pytest.mark.parametrize('ext', ['.mp3', '.m4b', '.flac'])
+def test_series_num_zero_decimal_normalised(ext, base_mp3, base_m4b, base_flac, tmp_path):
+    # A file tagged '8.0' (the Dresden Files case) must read back as '8',
+    # while a real fraction '8.5' is preserved — across formats.
+    src = {'.mp3': base_mp3, '.m4b': base_m4b, '.flac': base_flac}[ext]
+    f = shutil.copy2(src, tmp_path / f'sn{ext}')
+    tg.write_tags(f, {'title': 'X', 'author': 'Y', 'series': 'S', 'series_num': '8.0'})
+    assert tg.read_tags(f)['series_num'] == '8'
+    tg.write_tags(f, {'series_num': '8.5'})
+    assert tg.read_tags(f)['series_num'] == '8.5'
+
 
 # ── narrator rules (author-as-narrator regression) ───────────────
 

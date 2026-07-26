@@ -96,10 +96,22 @@ def send_to_recycle_bin(paths: list) -> bool:
     res = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op))
     return res == 0 and not op.fAnyOperationsAborted
 
+def norm_series_num(num) -> str:
+    """Drop a trailing all-zero decimal from a series index so whole numbers
+    don't carry a pointless '.0':
+        '8.0' → '8',  '08.0' → '08',  '12.00' → '12'
+    Real fractions and non-numeric values are left exactly as-is:
+        '8.5' → '8.5',  '02.5' → '02.5',  'IV' → 'IV'
+    The integer part (including any leading zero) is preserved."""
+    s = str(num or '').strip()
+    m = re.match(r'^(\d+)\.0+$', s)
+    return m.group(1) if m else s
+
 def _norm_num(num: str) -> str:
-    """Normalise a series index: strip leading zeros on integers ('05'→'5'),
-    leave decimals alone ('18.5')."""
-    num = (num or '').strip()
+    """Normalise a series index for the series-parser: strip a trailing
+    '.0' ('8.0'→'8') and leading zeros on integers ('05'→'5'), while leaving
+    real decimals alone ('18.5')."""
+    num = norm_series_num(num)
     return str(int(num)) if num.isdigit() else num
 
 def parse_audiobook_title(name: str) -> dict:

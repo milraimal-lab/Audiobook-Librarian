@@ -1,7 +1,25 @@
 """Pure helpers: title parsing, filename sanitizing, ffmetadata escaping,
 human-readable size/duration formatting."""
 from util import (parse_audiobook_title, parse_series_group, _sanitize, _ffesc,
-                  fmt_size, fmt_duration)
+                  fmt_size, fmt_duration, norm_series_num)
+
+
+def test_norm_series_num_strips_zero_decimal():
+    assert norm_series_num('8.0') == '8'
+    assert norm_series_num('08.0') == '08'      # leading zero preserved
+    assert norm_series_num('12.00') == '12'
+
+def test_norm_series_num_keeps_real_fractions():
+    assert norm_series_num('8.5') == '8.5'
+    assert norm_series_num('02.5') == '02.5'
+    assert norm_series_num('07.3') == '07.3'
+    assert norm_series_num('10.10') == '10.10'
+
+def test_norm_series_num_passthrough():
+    assert norm_series_num('3') == '3'
+    assert norm_series_num('') == ''
+    assert norm_series_num(None) == ''
+    assert norm_series_num('IV') == 'IV'
 
 
 def test_parse_paren_series_hash():

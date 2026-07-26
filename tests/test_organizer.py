@@ -29,6 +29,11 @@ def test_pad_num_keeps_fractions():
     assert org.pad_num('3.5') == '03.5'
     assert org.pad_num('7.25') == '07.25'
 
+def test_pad_num_drops_zero_decimal():
+    assert org.pad_num('8.0') == '08'
+    assert org.pad_num('12.00') == '12'
+    assert org.pad_num('3.0') == '03'
+
 def test_pad_num_non_numeric_passthrough():
     assert org.pad_num('abc') == 'abc'
     assert org.pad_num('') == ''

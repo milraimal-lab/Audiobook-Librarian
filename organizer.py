@@ -30,9 +30,10 @@ def sanitize(name: str) -> str:
 
 
 def pad_num(num_str: str, width: int = 2) -> str:
-    """Zero-pad the whole part to *width* digits, keeping any fraction:
-    '3' → '03',  '18.5' → '18.5',  '3.5' → '03.5'.
-    Non-numeric strings are returned unchanged."""
+    """Zero-pad the whole part to *width* digits, keeping any real fraction:
+    '3' → '03',  '18.5' → '18.5',  '3.5' → '03.5',  '8.0' → '08'.
+    A trailing all-zero decimal is dropped. Non-numeric strings are
+    returned unchanged."""
     s = str(num_str).strip()
     try:
         float(s)
@@ -43,7 +44,8 @@ def pad_num(num_str: str, width: int = 2) -> str:
         base = f"{int(whole):0{width}d}"
     except ValueError:
         return s
-    return f"{base}.{frac}" if dot and frac else base
+    # keep the fraction only if it isn't all zeros ('.0' is meaningless)
+    return f"{base}.{frac}" if (dot and frac.strip('0')) else base
 
 
 # ──────────────────────────────────────────────────────────────────

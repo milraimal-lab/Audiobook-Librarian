@@ -11,6 +11,8 @@ import base64
 from pathlib import Path
 from typing import Optional
 
+from util import norm_series_num
+
 # ──────────────────────────────────────────────────────────────────
 #  Standard tags — single source of truth for the Extras panel and
 #  purge_extra_tags. Everything NOT matched here is an "extra".
@@ -91,23 +93,26 @@ def read_tags(path: Path) -> dict:
     ext = path.suffix.lower()
     try:
         if ext == '.mp3':
-            return _read_mp3(path)
-        if ext in ('.m4b', '.m4a', '.aac', '.mp4', '.alac'):
-            return _read_m4b(path)
-        if ext == '.flac':
-            return _read_flac(path)
-        if ext == '.ogg':
-            return _read_ogg(path)
-        if ext == '.opus':
-            return _read_opus(path)
-        # Generic fallback (wav, wma, aiff …)
-        audio = mutagen.File(path)
-        if audio:
-            return {'duration': getattr(audio.info, 'length', 0.0)}
+            result = _read_mp3(path)
+        elif ext in ('.m4b', '.m4a', '.aac', '.mp4', '.alac'):
+            result = _read_m4b(path)
+        elif ext == '.flac':
+            result = _read_flac(path)
+        elif ext == '.ogg':
+            result = _read_ogg(path)
+        elif ext == '.opus':
+            result = _read_opus(path)
+        else:
+            # Generic fallback (wav, wma, aiff …)
+            audio = mutagen.File(path)
+            result = {'duration': getattr(audio.info, 'length', 0.0)} if audio else {}
     except Exception as exc:
         print(f"[tagger] read error {path.name}: {exc}")
         return {'_error': str(exc)}
-    return {}
+    # Whole-number series indices shouldn't carry a '.0' ('08.0' → '08')
+    if result.get('series_num'):
+        result['series_num'] = norm_series_num(result['series_num'])
+    return result
 
 
 def audio_content_md5(path: Path) -> Optional[str]:
@@ -221,6 +226,12 @@ def read_all_tags_raw(path: Path) -> dict:
 def write_tags(path: Path, fields: dict) -> None:
     """Write normalised *fields* dict to the file's tags."""
     ext = path.suffix.lower()
+    # Persist series indices clean: '8.0' → '8' (never overwrite the caller's
+    # dict — take a shallow copy only when there's something to normalise)
+    if fields.get('series_num'):
+        cleaned = norm_series_num(fields['series_num'])
+        if cleaned != fields['series_num']:
+            fields = {**fields, 'series_num': cleaned}
     try:
         if ext == '.mp3':
             _write_mp3(path, fields)
