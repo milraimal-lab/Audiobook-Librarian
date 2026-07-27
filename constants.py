@@ -3,7 +3,7 @@
 import os as _os
 
 APP_NAME    = "Audiobook Librarian"
-APP_VERSION = "2.7.1"
+APP_VERSION = "2.7.2"
 
 # How many M4B builds may run at once. ffmpeg concat / stream-copy jobs are
 # mostly I/O-bound, so running a few together finishes a batch much faster
