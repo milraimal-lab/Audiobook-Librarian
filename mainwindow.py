@@ -1814,5 +1814,5 @@ class MainWindow(QMainWindow):
         if self._dup_thread and self._dup_thread.isRunning():
             self._dup_thread.stop(); self._dup_thread.wait(500)
         self._persist_settings()
-        log_line("=== AudioBook Manager v2 closed ===")
+        log_line(f"=== {APP_NAME} v{APP_VERSION} closed ===")
         event.accept()

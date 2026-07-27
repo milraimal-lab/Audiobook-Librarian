@@ -1,4 +1,4 @@
-# AudioBook Manager
+# Audiobook Librarian
 (Warning: Vibe Coded)
 A Windows desktop app for wrangling a messy audiobook collection into a clean,
 tagged, consistently-organized library. Built with PyQt6 + mutagen.
@@ -50,7 +50,7 @@ Build M4B and Repair.
 build.bat
 ```
 
-Produces `dist\AudiobookManager.exe` and bundles `ffmpeg.exe` beside it
+Produces `dist\AudiobookLibrarian.exe` and bundles `ffmpeg.exe` beside it
 (copied from PATH or downloaded on first build). Ship the two files together.
 
 ## Tests

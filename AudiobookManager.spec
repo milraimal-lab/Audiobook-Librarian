@@ -62,7 +62,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='AudiobookManager',
+    name='AudiobookLibrarian',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -74,5 +74,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    # icon='icon.ico',      # uncomment and point to an .ico file if you have one
+    icon='icon.ico',
 )
