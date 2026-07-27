@@ -791,8 +791,9 @@ class FilesTab(QWidget):
     ops_performed       = pyqtSignal(str, list, bool)  # desc, pairs, is_copy
     build_m4b_requested = pyqtSignal(object)           # list[sc.Book]
     build_m4b_options_requested = pyqtSignal()          # open the M4B options dialog
-    split_requested     = pyqtSignal(list)             # [(book, file_idx), …]
-    autosplit_requested = pyqtSignal(object)           # sc.Book → split by album tag
+    split_requested      = pyqtSignal(list)            # [(book, file_idx), …] → one new book
+    split_each_requested = pyqtSignal(list)            # [(book, file_idx), …] → one book each
+    autosplit_requested  = pyqtSignal(object)          # sc.Book → split by album tag
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -822,11 +823,14 @@ class FilesTab(QWidget):
         self._split_btn = QPushButton("✂ Split")
         self._split_btn.setToolTip(
             "Split a book that was scanned as one but is really several:\n"
-            "• Select file rows, then split them into a new book\n"
-            "• Or auto-split by each file's album tag")
+            "• Selected rows → one new book\n"
+            "• Each selected file → its own separate book\n"
+            "• Auto-split by each file's album tag")
         split_menu = QMenu(self._split_btn)
         split_menu.addAction("Split selected files into a new book").triggered.connect(
             self._request_split_selected)
+        split_menu.addAction("Split each selected file into its own book").triggered.connect(
+            self._request_split_each)
         split_menu.addAction("Auto-split this book by album tag").triggered.connect(
             lambda: self.autosplit_requested.emit(self.book))
         self._split_btn.setMenu(split_menu)
@@ -1081,14 +1085,25 @@ class FilesTab(QWidget):
         self.status_message.emit(f"Renamed {renamed} file(s).")
         self.refresh()
 
-    def _request_split_selected(self):
+    def _selected_file_pairs(self) -> list:
         rows = sorted({i.row() for i in self.tbl.selectedIndexes()})
-        pairs = [t for r in rows if (t := self._row_target(r))]
+        return [t for r in rows if (t := self._row_target(r))]
+
+    def _request_split_selected(self):
+        pairs = self._selected_file_pairs()
         if not pairs:
             QMessageBox.information(self, "Split",
                 "Select one or more file rows first, then split them off.")
             return
         self.split_requested.emit(pairs)
+
+    def _request_split_each(self):
+        pairs = self._selected_file_pairs()
+        if not pairs:
+            QMessageBox.information(self, "Split",
+                "Select the file rows you want turned into separate books.")
+            return
+        self.split_each_requested.emit(pairs)
 
     def _current_af(self):
         t = self._row_target(self.tbl.currentRow())

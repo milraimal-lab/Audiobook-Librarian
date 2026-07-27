@@ -118,3 +118,40 @@ def test_split_from_import_tree_stays_in_import(win, tmp_path):
     win._split_files_to_new_book([(book, 4), (book, 5)])
     assert len(win.import_books) == 2
     assert not win.books           # nothing leaked into the library list
+
+
+# ── Split-each: every selected file → its own single-file book ──
+
+def test_split_each_all_files_removes_source(win, tmp_path):
+    book = _book(tmp_path, 'Anthology', 5, author='Various')
+    win.books.append(book)
+    win._split_files_each_to_own_book([(book, i) for i in range(5)])
+    assert len(win.books) == 5              # source replaced by 5 books
+    assert book not in win.books            # emptied source dropped
+    assert all(b.file_count == 1 for b in win.books)
+    assert all(b.author == 'Various' for b in win.books)          # inherited
+    assert sorted(b.title for b in win.books) == [
+        f'Anthology {i:02d}' for i in range(1, 6)]                # titled per file
+
+def test_split_each_subset_keeps_source(win, tmp_path):
+    book = _book(tmp_path, 'Mixed', 6)
+    win.books.append(book)
+    win._split_files_each_to_own_book([(book, 0), (book, 1)])
+    assert len(win.books) == 3              # source (now 4 files) + 2 singles
+    assert book in win.books and book.file_count == 4
+    assert all(b.file_count == 1 for b in win.books if b is not book)
+
+def test_split_each_from_import_stays_in_import(win, tmp_path):
+    book = _book(tmp_path, 'Imp', 3)
+    win.import_books.append(book)
+    win._split_files_each_to_own_book([(book, 0), (book, 1), (book, 2)])
+    assert len(win.import_books) == 3 and not win.books
+
+def test_split_each_declined_does_nothing(win, tmp_path, monkeypatch):
+    from PyQt6.QtWidgets import QMessageBox
+    monkeypatch.setattr(QMessageBox, 'question',
+                        staticmethod(lambda *a, **k: QMessageBox.StandardButton.No))
+    book = _book(tmp_path, 'Keep', 4)
+    win.books.append(book)
+    win._split_files_each_to_own_book([(book, 0), (book, 1)])
+    assert len(win.books) == 1 and book.file_count == 4          # unchanged

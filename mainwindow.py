@@ -382,6 +382,7 @@ class MainWindow(QMainWindow):
         self.files_tab.build_m4b_requested.connect(self._build_m4b)
         self.files_tab.build_m4b_options_requested.connect(self._configure_m4b)
         self.files_tab.split_requested.connect(self._split_files_to_new_book)
+        self.files_tab.split_each_requested.connect(self._split_files_each_to_own_book)
         self.files_tab.autosplit_requested.connect(self._autosplit_book)
         self.tabs.addTab(self.files_tab, "Files")
 
@@ -1017,6 +1018,61 @@ class MainWindow(QMainWindow):
         tree.select_book(last)
         self._set_status(
             f"Split off {len(created)} new book(s) — fix titles if needed, then Save.")
+
+    def _split_files_each_to_own_book(self, pairs: list):
+        """Files tab 'Split each' — every selected file becomes its own
+        single-file book. A source book left with no files is removed."""
+        n = len(pairs)
+        if not n: return
+        ans = QMessageBox.question(self, "Split Into Separate Books",
+            f"Turn each of the {n} selected file(s) into its own book?\n\n"
+            "Each becomes a single-file book titled from its own tag or filename.\n"
+            "Nothing is written to disk until you Save.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if ans != QMessageBox.StandardButton.Yes: return
+
+        by_id: dict = {}
+        for book, idx in pairs:
+            by_id.setdefault(book.id, (book, []))[1].append(idx)
+        created, emptied = [], []
+        for book, indices in by_id.values():
+            indices = sorted({i for i in indices if 0 <= i < book.file_count})
+            if not indices: continue
+            taken = [book.files[i] for i in indices]
+            for i in reversed(indices):
+                book.files.pop(i)
+            book.modified = True
+            lst = self.books if book in self.books else self.import_books
+            for af in taken:
+                # fast scan may not have read this file — hydrate for a good title
+                if not af.hydrated:
+                    t = tg.read_tags(af.path); t.pop('_error', None)
+                    af.tags = t
+                    af.duration = float(t.get('duration', 0) or 0)
+                    af.hydrated = True
+                nb = self._new_book_from(book, [af])
+                # each file is its own book → title from ITS name, not the
+                # album tag it shares with its neighbours
+                nb.title = (af.tags.get('title', '').strip() or af.path.stem)
+                lst.append(nb); created.append(nb)
+            if book.file_count == 0:
+                emptied.append(book)
+
+        for book in emptied:
+            for lst in (self.books, self.import_books):
+                if book in lst: lst.remove(book)
+            for tr in (self.book_tree, self.import_tree):
+                if book in tr._books: tr._books.remove(book)
+            if self.current_book is book:
+                self.current_book = None
+                self.files_tab.set_book(None)
+
+        if not created: return
+        self._populate_both_trees(keep_expanded=True)
+        last = created[-1]
+        (self.book_tree if last in self.books else self.import_tree).select_book(last)
+        self._set_status(
+            f"Split into {len(created)} separate book(s) — set titles/authors, then Save.")
 
     def _autosplit_book(self, book: Optional[sc.Book]):
         """Split one folder-glued book into several using the album tag."""
