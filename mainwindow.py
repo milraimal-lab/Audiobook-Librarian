@@ -56,6 +56,7 @@ class MainWindow(QMainWindow):
         self._m4b_threads:  dict                     = {}   # M4bThread -> (book, out_path, recycle)
         self._m4b_frac:     dict                     = {}   # M4bThread -> float 0..1 progress
         self._m4b_msg:      dict                     = {}   # M4bThread -> latest status text
+        self._m4b_bars:     dict                     = {}   # M4bThread -> (row, QProgressBar, QLabel)
         self._m4b_queue:    list                     = []   # [(book, out_path, recycle)] pending
         self._m4b_results:  list                     = []
         self._m4b_total:    int                      = 0
@@ -94,6 +95,9 @@ class MainWindow(QMainWindow):
         outer.addWidget(self._build_activity_feed())
         outer.setStretchFactor(0, 1); outer.setStretchFactor(1, 0)
         outer.setSizes([900, 120])
+        # M4B build progress — a pinned strip (NOT in the scrolling activity
+        # list), so its bars stay put in view while builds run.
+        rl.addWidget(self._build_m4b_panel())
         self.status_bar = QStatusBar(); self.setStatusBar(self.status_bar)
         self.unsaved_lbl = QLabel("")
         self.unsaved_lbl.setStyleSheet(f"color:{YELLOW}; font-weight:bold; padding:0 8px;")
@@ -125,6 +129,43 @@ class MainWindow(QMainWindow):
             " QListWidget::item { padding:1px 4px; }")
         v.addWidget(self.activity)
         return box
+
+    def _build_m4b_panel(self):
+        """A fixed strip that shows one live progress BAR per running M4B
+        build. Pinned above the status bar so it never scrolls out of view;
+        hidden entirely when no build is running."""
+        self._m4b_panel = QWidget()
+        v = QVBoxLayout(self._m4b_panel); v.setContentsMargins(4, 2, 4, 2); v.setSpacing(1)
+        self._m4b_panel_hdr = QLabel("Building M4Bs")
+        self._m4b_panel_hdr.setStyleSheet(f"color:{BLUE}; font-size:10px; font-weight:bold;")
+        v.addWidget(self._m4b_panel_hdr)
+        self._m4b_rows_box = QWidget()
+        self._m4b_rows_lay = QVBoxLayout(self._m4b_rows_box)
+        self._m4b_rows_lay.setContentsMargins(0, 0, 0, 0); self._m4b_rows_lay.setSpacing(1)
+        v.addWidget(self._m4b_rows_box)
+        self._m4b_panel.setVisible(False)
+        return self._m4b_panel
+
+    def _add_m4b_bar(self, t, name):
+        """Create a labelled progress bar row for one running build."""
+        row = QWidget()
+        h = QHBoxLayout(row); h.setContentsMargins(0, 0, 0, 0); h.setSpacing(6)
+        lbl = QLabel(name)
+        lbl.setStyleSheet("font-size:11px;")
+        lbl.setMinimumWidth(180); lbl.setMaximumWidth(340)
+        lbl.setToolTip(name)
+        bar = QProgressBar()
+        bar.setRange(0, 100); bar.setValue(0)
+        bar.setMaximumHeight(15); bar.setTextVisible(True)
+        h.addWidget(lbl); h.addWidget(bar, 1)
+        self._m4b_rows_lay.addWidget(row)
+        self._m4b_bars[t] = (row, bar, lbl)
+        self._m4b_panel.setVisible(True)
+
+    def _remove_m4b_bar(self, t):
+        rb = self._m4b_bars.pop(t, None)
+        if rb:
+            rb[0].setParent(None); rb[0].deleteLater()
 
     def _clear_activity(self):
         self.activity.clear(); self._activity_rows.clear()
@@ -1157,7 +1198,8 @@ class MainWindow(QMainWindow):
             self._m4b_threads[t] = (book, out_path, recycle)
             self._m4b_frac[t]    = 0.0
             self._m4b_msg[t]     = f"Building {out_path.name}…"
-            self._activity(f"Building {out_path.name}…  0%", key=f"m4b:{out_path.name}")
+            self._add_m4b_bar(t, out_path.name)
+            self._activity(f"⏳ Building {out_path.name}…")
             t.progress.connect(self._on_m4b_progress)
             t.finished.connect(self._on_m4b_done)
             t.error.connect(self._on_m4b_error)
@@ -1168,29 +1210,33 @@ class MainWindow(QMainWindow):
         self._update_m4b_status()
 
     def _update_m4b_status(self):
-        """Roll the in-flight jobs into one aggregate progress bar + status."""
+        """Roll the in-flight jobs into one aggregate progress bar + status,
+        and keep the pinned M4B panel's header current."""
         total = max(self._m4b_total, 1)
         frac  = (self._m4b_done + sum(self._m4b_frac.values())) / total
         self.prog_bar.setRange(0, 100)
         self.prog_bar.setValue(min(int(frac * 100), 100))
         running = len(self._m4b_threads)
+        hdr = (f"Building M4Bs — {self._m4b_done}/{self._m4b_total} done, "
+               f"{running} running"
+               + (f", {len(self._m4b_queue)} queued" if self._m4b_queue else ""))
+        self._m4b_panel_hdr.setText(hdr)
         if self._m4b_total > 1:
-            self._set_status(
-                f"[{self._m4b_done}/{self._m4b_total}] Building M4Bs — "
-                f"{running} running"
-                + (f", {len(self._m4b_queue)} queued" if self._m4b_queue else "")
-                + "…", log=False)
+            self._set_status(f"[{self._m4b_done}/{self._m4b_total}] Building M4Bs — "
+                             f"{running} running"
+                             + (f", {len(self._m4b_queue)} queued" if self._m4b_queue else "")
+                             + "…", log=False)
         elif self._m4b_msg:
             self._set_status(next(iter(self._m4b_msg.values())), log=False)
 
     def _on_m4b_progress(self, cur, tot, msg):
         t = self.sender()
         if t in self._m4b_frac and tot > 0:
-            self._m4b_frac[t] = min(cur / tot, 1.0)
+            frac = min(cur / tot, 1.0)
+            self._m4b_frac[t] = frac
             self._m4b_msg[t]  = msg
-            name = self._m4b_threads[t][1].name
-            pct  = int(min(cur / tot, 1.0) * 100)
-            self._activity(f"Building {name}…  {pct}%", key=f"m4b:{name}")
+            rb = self._m4b_bars.get(t)
+            if rb: rb[1].setValue(int(frac * 100))
         self._update_m4b_status()
 
     def _on_m4b_done(self, out_path: str):
@@ -1260,6 +1306,7 @@ class MainWindow(QMainWindow):
             self._m4b_threads.pop(t, None)
             self._m4b_frac.pop(t, None)
             self._m4b_msg.pop(t, None)
+            self._remove_m4b_bar(t)
             self._m4b_done += 1
         self._pump_m4b()
 
@@ -1269,6 +1316,9 @@ class MainWindow(QMainWindow):
         self._m4b_threads.clear()
         self._m4b_frac.clear()
         self._m4b_msg.clear()
+        for t in list(self._m4b_bars):
+            self._remove_m4b_bar(t)
+        self._m4b_panel.setVisible(False)
         self.prog_bar.setVisible(False)
         results, self._m4b_results = self._m4b_results, []
         recycled, self._m4b_recycled = self._m4b_recycled, 0
