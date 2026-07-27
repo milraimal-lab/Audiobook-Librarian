@@ -48,11 +48,13 @@ Build M4B and Repair.
 
 ```
 build.bat
-or download from https://github.com/milraimal-lab/Audiobook-Librarian/releases/tag/V2.7.3
 ```
 
 Produces `dist\AudiobookLibrarian.exe` and bundles `ffmpeg.exe` beside it
 (copied from PATH or downloaded on first build). Ship the two files together.
+
+Prefer a prebuilt binary? Download the latest from the
+[**Releases**](https://github.com/milraimal-lab/Audiobook-Librarian/releases/latest) page.
 
 ## Tests
 

@@ -16,7 +16,7 @@ if errorlevel 1 (
 
 echo.
 echo === Building AudiobookLibrarian.exe ===
-pyinstaller --clean AudiobookManager.spec
+pyinstaller --clean AudiobookLibrarian.spec
 
 if errorlevel 1 (
     echo.
