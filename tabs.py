@@ -18,7 +18,8 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import (Qt, QThread, pyqtSignal, QSize, QMimeData, QByteArray,
                           QPoint, QTimer, QStringListModel)
-from PyQt6.QtGui  import QPixmap, QAction, QColor, QDrag, QFont, QCursor, QPainter, QPen
+from PyQt6.QtGui  import (QPixmap, QIcon, QAction, QColor, QDrag, QFont, QCursor,
+                          QPainter, QPen)
 
 import scanner as sc
 import tagger as tg
@@ -27,7 +28,7 @@ import audible as au
 import organizer as org
 
 from constants import *
-from util import parse_audiobook_title, _sanitize, log_line
+from util import parse_audiobook_title, _sanitize, log_line, cover_key
 from workers import FieldSaveThread, OrganizeThread
 from dialogs import (RawTagDialog, AddTagDialog, OpenLibraryDialog,
                      CoverViewDialog, SeriesParseDialog, _ClickableLabel)
@@ -714,11 +715,15 @@ class EditMetadataTab(QWidget):
         self._rebuild_extra_tags()
         self.status_message.emit(f"Purged {removed} extra tag(s) from {len(paths)} file(s).")
 
+# Files-tab column indices
+(COL_F_NUM, COL_F_NAME, COL_F_ALBUM, COL_F_NEW, COL_F_DUR, COL_F_COVER) = range(6)
+
+
 class _FileTable(QTableWidget):
     """File table that drags rows out (to the tree) and accepts drops on
     itself for reordering, with a live insertion-line indicator."""
     def __init__(self, owner: 'FilesTab'):
-        super().__init__(0, 4)
+        super().__init__(0, 6)
         self._owner = owner
         self._drop_line = -1   # gap index the line is drawn at; -1 = hidden
 
@@ -791,16 +796,20 @@ class FilesTab(QWidget):
     ops_performed       = pyqtSignal(str, list, bool)  # desc, pairs, is_copy
     build_m4b_requested = pyqtSignal(object)           # list[sc.Book]
     build_m4b_options_requested = pyqtSignal()          # open the M4B options dialog
-    split_requested      = pyqtSignal(list)            # [(book, file_idx), …] → one new book
-    split_each_requested = pyqtSignal(list)            # [(book, file_idx), …] → one book each
-    autosplit_requested  = pyqtSignal(object)          # sc.Book → split by album tag
+    split_requested       = pyqtSignal(list)           # [(book, file_idx), …] → one new book
+    split_each_requested  = pyqtSignal(list)           # [(book, file_idx), …] → one book each
+    autosplit_requested   = pyqtSignal(object)         # sc.Book → split by album tag
+    autosplit_cover_requested = pyqtSignal(object)     # sc.Book → split by cover art
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.book: Optional[sc.Book] = None
         self._selected_books: List[sc.Book] = []
-        self._row_map: list = []      # row → (book, file_idx) or ('sep', book)
+        self._row_map: list = []      # row → (book, file_idx) | ('sep', book) | ('csep', book)
         self._collapsed: set = set()  # book ids whose file rows are hidden
+        self._group_by_cover = False  # single-book view grouped by cover art
+        self._collapsed_covers: set = set()   # cover keys collapsed in that view
+        self._thumb_cache: dict = {}  # cover key → QPixmap thumbnail (or None)
         self._build_ui()
 
     def _build_ui(self):
@@ -825,7 +834,7 @@ class FilesTab(QWidget):
             "Split a book that was scanned as one but is really several:\n"
             "• Selected rows → one new book\n"
             "• Each selected file → its own separate book\n"
-            "• Auto-split by each file's album tag")
+            "• Auto-split by each file's album tag or cover art")
         split_menu = QMenu(self._split_btn)
         split_menu.addAction("Split selected files into a new book").triggered.connect(
             self._request_split_selected)
@@ -833,8 +842,17 @@ class FilesTab(QWidget):
             self._request_split_each)
         split_menu.addAction("Auto-split this book by album tag").triggered.connect(
             lambda: self.autosplit_requested.emit(self.book))
+        split_menu.addAction("Auto-split this book by cover art").triggered.connect(
+            lambda: self.autosplit_cover_requested.emit(self.book))
         self._split_btn.setMenu(split_menu)
         hdr.addWidget(self._split_btn)
+        self._cover_grp_btn = QPushButton("🖼 By cover")
+        self._cover_grp_btn.setCheckable(True)
+        self._cover_grp_btn.setToolTip(
+            "Group this book's files by their cover art into collapsible\n"
+            "sections — see at a glance which files share which cover.")
+        self._cover_grp_btn.toggled.connect(self._toggle_group_by_cover)
+        hdr.addWidget(self._cover_grp_btn)
         self._m4b_btn = QPushButton("Build M4B…")
         self._m4b_btn.setToolTip(
             "Combine each selected book's files into a single .m4b with chapters.\n"
@@ -865,12 +883,17 @@ class FilesTab(QWidget):
         lay.addLayout(hdr)
 
         self.tbl = _FileTable(self)
-        self.tbl.setHorizontalHeaderLabels(["#", "Current Filename", "New Name Preview", "Duration"])
+        self.tbl.setHorizontalHeaderLabels(
+            ["#", "Current Filename", "Album", "New Name Preview", "Duration", "Cover"])
         hh = self.tbl.horizontalHeader()
-        hh.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        hh.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        hh.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        hh.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        hh.setSectionResizeMode(COL_F_NUM,   QHeaderView.ResizeMode.ResizeToContents)
+        hh.setSectionResizeMode(COL_F_NAME,  QHeaderView.ResizeMode.Stretch)
+        hh.setSectionResizeMode(COL_F_ALBUM, QHeaderView.ResizeMode.Interactive)
+        hh.setSectionResizeMode(COL_F_NEW,   QHeaderView.ResizeMode.Stretch)
+        hh.setSectionResizeMode(COL_F_DUR,   QHeaderView.ResizeMode.ResizeToContents)
+        hh.setSectionResizeMode(COL_F_COVER, QHeaderView.ResizeMode.ResizeToContents)
+        self.tbl.setColumnWidth(COL_F_ALBUM, 150)
+        self.tbl.setIconSize(QSize(30, 30))       # cover thumbnails
         self.tbl.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.tbl.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.tbl.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -971,16 +994,64 @@ class FilesTab(QWidget):
             counter += 1
         return stems
 
+    def _thumb_for(self, af):
+        """Cached ~30px cover thumbnail for a file, or None (no/unhydrated cover)."""
+        if not af.hydrated:
+            return None
+        data = af.tags.get('cover_art')
+        key = cover_key(data)
+        if not key:
+            return None
+        if key in self._thumb_cache:
+            return self._thumb_cache[key]
+        px = QPixmap()
+        px.loadFromData(bytes(data))
+        if px.isNull():
+            self._thumb_cache[key] = None
+        else:
+            self._thumb_cache[key] = px.scaled(
+                30, 30, Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation)
+        return self._thumb_cache[key]
+
+    def _add_file_row(self, book, real_idx, af, stem, display_num):
+        r = self.tbl.rowCount(); self.tbl.insertRow(r)
+        self.tbl.setItem(r, COL_F_NUM, QTableWidgetItem(str(display_num)))
+        self.tbl.setItem(r, COL_F_NAME, QTableWidgetItem(af.filename))
+        album = af.tags.get('album', '') if af.hydrated else ''
+        self.tbl.setItem(r, COL_F_ALBUM, QTableWidgetItem(album))
+        pi = QTableWidgetItem(stem + af.ext); pi.setForeground(QColor(GREEN))
+        self.tbl.setItem(r, COL_F_NEW, pi)
+        self.tbl.setItem(r, COL_F_DUR, QTableWidgetItem(af.duration_str()))
+        citem = QTableWidgetItem()
+        thumb = self._thumb_for(af)
+        if thumb is not None:
+            citem.setIcon(QIcon(thumb))
+        self.tbl.setItem(r, COL_F_COVER, citem)
+        self._row_map.append((book, real_idx))
+
     def refresh(self):
         self.tbl.clearSpans()
         self.tbl.setRowCount(0)
         self._row_map = []
         books = self._displayed_books()
         multi = len(books) > 1
+        cover_mode = (self._group_by_cover and not multi
+                      and bool(books) and bool(books[0].files))
+        self.tbl.setDragEnabled(not cover_mode)       # reorder off while grouped
+        self._cover_grp_btn.setEnabled(not multi)
+
         if multi:
             self._files_lbl.setText(f"Files in {len(books)} selected books")
+        elif cover_mode:
+            self._files_lbl.setText("Files grouped by cover")
         else:
             self._files_lbl.setText("Files in this book")
+
+        if cover_mode:
+            self._refresh_cover_grouped(books[0])
+            return
+
         for book in books:
             collapsed = book.id in self._collapsed
             if multi:
@@ -990,7 +1061,7 @@ class FilesTab(QWidget):
                 btn.setStyleSheet("padding:0; font-weight:bold;")
                 btn.setToolTip("Collapse / expand this book's files")
                 btn.clicked.connect(lambda _, bid=book.id: self._toggle_block(bid))
-                self.tbl.setCellWidget(r, 0, btn)
+                self.tbl.setCellWidget(r, COL_F_NUM, btn)
                 dur = f"  [{book.duration_str()}]" if book.duration_str() else ""
                 sep = QTableWidgetItem(f"{book.display_name}  ({book.file_count} files){dur}")
                 sep.setForeground(QColor(PEACH))
@@ -998,35 +1069,64 @@ class FilesTab(QWidget):
                 sep.setFlags(Qt.ItemFlag.ItemIsEnabled
                              | Qt.ItemFlag.ItemIsSelectable
                              | Qt.ItemFlag.ItemIsDragEnabled)
-                self.tbl.setItem(r, 1, sep)
-                self.tbl.setSpan(r, 1, 1, 3)
+                self.tbl.setItem(r, COL_F_NAME, sep)
+                self.tbl.setSpan(r, COL_F_NAME, 1, COL_F_DUR - COL_F_NAME + 1)
                 self._row_map.append(('sep', book))
                 if collapsed:
                     continue
             stems = self._new_names_for(book)
             for i, (af, stem) in enumerate(zip(book.files, stems), 1):
-                r = self.tbl.rowCount(); self.tbl.insertRow(r)
-                self.tbl.setItem(r, 0, QTableWidgetItem(str(i)))
-                self.tbl.setItem(r, 1, QTableWidgetItem(af.filename))
-                pi = QTableWidgetItem(stem + af.ext); pi.setForeground(QColor(GREEN))
-                self.tbl.setItem(r, 2, pi)
-                self.tbl.setItem(r, 3, QTableWidgetItem(af.duration_str()))
-                self._row_map.append((book, i - 1))
+                self._add_file_row(book, i - 1, af, stem, i)
+
+    def _refresh_cover_grouped(self, book):
+        """Single-book view: files grouped into collapsible sections by cover."""
+        stems = self._new_names_for(book)
+        groups: dict = {}; order: list = []
+        for idx, af in enumerate(book.files):
+            k = cover_key(af.tags.get('cover_art')) if af.hydrated else ''
+            if k not in groups:
+                groups[k] = []; order.append(k)
+            groups[k].append(idx)
+        for gi, key in enumerate(order, 1):
+            idxs = groups[key]
+            collapsed = key in self._collapsed_covers
+            r = self.tbl.rowCount(); self.tbl.insertRow(r)
+            btn = QPushButton("+" if collapsed else "−")
+            btn.setFixedSize(24, 20); btn.setStyleSheet("padding:0; font-weight:bold;")
+            btn.setToolTip("Collapse / expand this cover group")
+            btn.clicked.connect(lambda _, k=key: self._toggle_cover(k))
+            self.tbl.setCellWidget(r, COL_F_NUM, btn)
+            label = (f"Cover {gi}  ({len(idxs)} file(s))" if key
+                     else f"No cover  ({len(idxs)} file(s))")
+            hdr = QTableWidgetItem(label); hdr.setForeground(QColor(PEACH))
+            hdr.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            self.tbl.setItem(r, COL_F_NAME, hdr)
+            self.tbl.setSpan(r, COL_F_NAME, 1, COL_F_DUR - COL_F_NAME + 1)
+            chdr = QTableWidgetItem()
+            thumb = self._thumb_for(book.files[idxs[0]])
+            if thumb is not None:
+                chdr.setIcon(QIcon(thumb))
+            self.tbl.setItem(r, COL_F_COVER, chdr)
+            self._row_map.append(('csep', book))
+            if collapsed:
+                continue
+            for idx in idxs:
+                self._add_file_row(book, idx, book.files[idx], stems[idx], idx + 1)
 
     def _row_target(self, row: int):
-        """Return (book, file_idx) for a table row, or None for separators/invalid."""
+        """Return (book, file_idx) for a file row, or None for header rows."""
         if 0 <= row < len(self._row_map):
             entry = self._row_map[row]
-            if entry and entry[0] != 'sep':
+            if entry and not isinstance(entry[0], str):
                 return entry
         return None
 
     def _row_book(self, row: int):
-        """Return the book a row belongs to — works for separator rows too."""
+        """Return the book a row belongs to — works for header rows too."""
         if 0 <= row < len(self._row_map):
             entry = self._row_map[row]
             if entry:
-                return entry[1] if entry[0] == 'sep' else entry[0]
+                return entry[1] if isinstance(entry[0], str) else entry[0]
         return None
 
     def _toggle_block(self, bid: str):
@@ -1034,12 +1134,27 @@ class FilesTab(QWidget):
         else: self._collapsed.add(bid)
         self.refresh()
 
+    def _toggle_cover(self, key: str):
+        if key in self._collapsed_covers: self._collapsed_covers.discard(key)
+        else: self._collapsed_covers.add(key)
+        self.refresh()
+
+    def _toggle_group_by_cover(self, checked: bool):
+        self._group_by_cover = checked
+        self.refresh()
+
     def _collapse_all(self):
-        self._collapsed = {b.id for b in self._displayed_books()}
+        if self._group_by_cover and len(self._displayed_books()) < 2 and self.book:
+            self._collapsed_covers = {
+                cover_key(af.tags.get('cover_art')) if af.hydrated else ''
+                for af in self.book.files}
+        else:
+            self._collapsed = {b.id for b in self._displayed_books()}
         self.refresh()
 
     def _expand_all(self):
         self._collapsed.clear()
+        self._collapsed_covers.clear()
         self.refresh()
 
     def _apply_rename(self):
@@ -1191,7 +1306,7 @@ class FilesTab(QWidget):
             anchor, after = None, True
         else:
             entry = self._row_map[gap]
-            if entry[0] == 'sep':               # gap at a block header → before that block
+            if isinstance(entry[0], str):       # gap at a header → before that block
                 anchor, after = entry[1], False
             else:
                 book, idx = entry               # inside a block: start → before, else after
@@ -1224,7 +1339,7 @@ class FilesTab(QWidget):
             tgt_book, insert_idx = books[-1], books[-1].file_count
         else:
             entry = self._row_map[gap]
-            if entry[0] == 'sep':
+            if isinstance(entry[0], str):
                 # Gap right before a block header → end of whatever block sits
                 # above it (works for collapsed blocks too); at the very top →
                 # start of that header's own block

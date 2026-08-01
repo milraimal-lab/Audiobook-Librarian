@@ -27,7 +27,7 @@ import organizer as org
 
 from constants import *
 from util import (_suggest_fix, find_ffmpeg, log_line, fmt_size, fmt_duration,
-                  parse_series_group)
+                  parse_series_group, _load_settings, _save_settings)
 from workers import SearchThread, CoverFetchThread, RepairThread
 
 class _ClickableLabel(QLabel):
@@ -76,11 +76,29 @@ class OpenLibraryDialog(QDialog):
         self._cover_pick: Optional[bytes] = None
         self._search_thread: Optional[SearchThread]     = None
         self._cover_thread:  Optional[CoverFetchThread] = None
+        # Remembered default: seed the query from series+author instead of
+        # title+author (handy when the ripped titles are wrong).
+        self._by_series = bool(_load_settings().get('search_by_series', False))
         self.setWindowTitle("Search Metadata")
         self.setMinimumSize(1050, 600)
         self._build_ui()
         if self.q_edit.text().strip():
             QTimer.singleShot(0, self._search)
+
+    def _seed_query(self) -> str:
+        """The query text seeded from the book: series+author when 'by series'
+        is on (and a series exists), else title+author."""
+        if self._by_series and (self.book.series or '').strip():
+            return f"{self.book.series} {self.book.author}".strip()
+        return f"{self.book.title} {self.book.author}".strip()
+
+    def _toggle_by_series(self, state):
+        self._by_series = bool(state)
+        s = _load_settings(); s['search_by_series'] = self._by_series; _save_settings(s)
+        # Reseed the box (only if the user hasn't hand-edited it away)
+        self.q_edit.setText(self._seed_query())
+        if self.q_edit.text().strip():
+            self._search()
 
     def _build_ui(self):
         lay = QVBoxLayout(self)
@@ -91,15 +109,22 @@ class OpenLibraryDialog(QDialog):
         srow.addWidget(self.src_cb)
         self.q_edit = QLineEdit()
         self.q_edit.setPlaceholderText("Search title, author, ISBN …")
-        self.q_edit.setText(f"{self.book.title} {self.book.author}".strip())
+        self.q_edit.setText(self._seed_query())
         self.q_edit.returnPressed.connect(self._search)
         srow.addWidget(self.q_edit)
+        self._series_cb = QCheckBox("By series")
+        self._series_cb.setToolTip(
+            "Seed the search from the SERIES + author instead of the title.\n"
+            "Useful when the ripped titles are wrong. Remembered as your default.")
+        self._series_cb.setChecked(self._by_series)
+        self._series_cb.stateChanged.connect(self._toggle_by_series)
+        srow.addWidget(self._series_cb)
         self.search_btn = QPushButton("Search")
         self.search_btn.setStyleSheet(BTN_PRIMARY)
         self.search_btn.clicked.connect(self._search)
         srow.addWidget(self.search_btn)
         lay.addLayout(srow)
-        self.status_lbl = QLabel("Searching…  •  Double-click any cell to pick that field  •  Double-click the cover to pick the image")
+        self.status_lbl = QLabel("Searching…  •  Double-click any cell to pick that field  •  Click a header to sort  •  Double-click the cover to pick it")
         self.status_lbl.setStyleSheet(f"color:{GRAY}; font-style:italic;")
         lay.addWidget(self.status_lbl)
         hsplit = QSplitter(Qt.Orientation.Horizontal)
@@ -115,6 +140,7 @@ class OpenLibraryDialog(QDialog):
         self.tbl.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.tbl.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.tbl.setWordWrap(True)
+        self.tbl.setSortingEnabled(True)   # click a header to sort results
         vh = self.tbl.verticalHeader()
         vh.setVisible(True)
         vh.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
@@ -172,22 +198,34 @@ class OpenLibraryDialog(QDialog):
             f"{len(results)} result(s)  •  Double-click a cell to pick it  •  "
             "tick 'Use' to pick the whole row")
         self._filling = True
+        self.tbl.setSortingEnabled(False)         # don't reorder mid-fill
         self.tbl.setRowCount(0)
-        for r in results:
+        for ri, r in enumerate(results):
             row = self.tbl.rowCount(); self.tbl.insertRow(row)
             use = QTableWidgetItem("")
             use.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
                          | Qt.ItemFlag.ItemIsUserCheckable)
             use.setCheckState(Qt.CheckState.Unchecked)
             use.setToolTip("Pick every field of this row (and its cover)")
+            use.setData(Qt.ItemDataRole.UserRole, ri)   # survives re-sorting
             self.tbl.setItem(row, 0, use)
             for col, key in enumerate(COL_KEYS):
                 self.tbl.setItem(row, col + 1, QTableWidgetItem(str(r.get(key,'') or '')))
         self._filling = False
+        self.tbl.setSortingEnabled(True)
         self.tbl.selectRow(0); self._on_cell_clicked(0, 0)
         self._cover_thread = CoverFetchThread(results)
         self._cover_thread.cover_ready.connect(self._on_cover_ready)
         self._cover_thread.start()
+
+    def _result_index(self, row: int) -> int:
+        """Map a (possibly re-sorted) table row to its result index, or -1."""
+        it = self.tbl.item(row, 0)
+        ri = it.data(Qt.ItemDataRole.UserRole) if it else None
+        return ri if isinstance(ri, int) else -1
+
+    def _current_result_index(self) -> int:
+        return self._result_index(self.tbl.currentRow())
 
     def _on_search_error(self, msg):
         self.search_btn.setEnabled(True); self.status_lbl.setText(f"Error: {msg}")
@@ -196,24 +234,27 @@ class OpenLibraryDialog(QDialog):
         if self._cover_thread and self._cover_thread.isRunning():
             self._cover_thread.stop(); self._cover_thread.wait(500)
 
-    def _on_cover_ready(self, row, data):
-        self._covers[row] = data
-        if self.tbl.currentRow() == row:
+    def _on_cover_ready(self, ri, data):
+        # ri is the result index (the cover thread walks results in order)
+        self._covers[ri] = data
+        if self._current_result_index() == ri:
             self._update_cover_preview(data)
-            self.cover_status.setText(f"Cover loaded (row {row+1})\nDouble-click image to pick")
+            self.cover_status.setText("Cover loaded\nDouble-click image to pick")
 
     def _on_cell_clicked(self, row, col):
-        data = self._covers.get(row)
+        ri = self._result_index(row)
+        data = self._covers.get(ri)
         if data:
             self._update_cover_preview(data)
-            self.cover_status.setText(f"Row {row+1} cover\nDouble-click image or button to pick")
-        elif row < len(self._results) and self._results[row].get('cover_id'):
-            self._update_cover_preview(None); self.cover_status.setText(f"Row {row+1}: cover loading…")
+            self.cover_status.setText("Cover for this result\nDouble-click image or button to pick")
+        elif 0 <= ri < len(self._results) and (self._results[ri].get('cover_id')
+                                               or self._results[ri].get('cover_url')):
+            self._update_cover_preview(None); self.cover_status.setText("Cover loading…")
         else:
             self._update_cover_preview(None); self.cover_status.setText("No cover for this result")
 
     def _pick_cover(self):
-        row = self.tbl.currentRow(); data = self._covers.get(row)
+        data = self._covers.get(self._current_result_index())
         if not data: self.cover_status.setText("Cover not loaded yet — wait a moment"); return
         if self._cover_pick == data:
             # Toggle off — picking the same cover again unpicks it
@@ -225,8 +266,7 @@ class OpenLibraryDialog(QDialog):
             return
         self._cover_pick = data
         self.cover_preview.setStyleSheet("border:2px solid #a6e3a1; border-radius:4px;")
-        self.cover_status.setText(f"✔ Cover from row {row+1} will be applied "
-                                  "(pick again to unpick)")
+        self.cover_status.setText("✔ This cover will be applied (pick again to unpick)")
         self._update_picks_label()
 
     def _update_cover_preview(self, data: Optional[bytes]):
@@ -246,12 +286,12 @@ class OpenLibraryDialog(QDialog):
         value = item.text().strip()
         if not value: return
         prev = self._picks.get(logical)
-        if prev:
-            pi = self.tbl.item(prev[0], logical + 1)
-            if pi: pi.setBackground(QColor("#181825"))
-        if prev == (row, value): del self._picks[logical]
+        if prev and prev[0] is not None:
+            prev[0].setBackground(QColor("#181825"))
+        if prev and prev[0] is item:      # double-clicked the same cell → unpick
+            del self._picks[logical]
         else:
-            self._picks[logical] = (row, value)
+            self._picks[logical] = (item, value)   # store the item, not the row
             item.setBackground(QColor(CELL_PICKED))
         self._update_picks_label()
 
@@ -271,9 +311,8 @@ class OpenLibraryDialog(QDialog):
         self._filling = False
 
         # Reset current pick highlights
-        for logical, (r, _) in self._picks.items():
-            pi = self.tbl.item(r, logical + 1)
-            if pi: pi.setBackground(QColor("#181825"))
+        for logical, (it, _) in self._picks.items():
+            if it is not None: it.setBackground(QColor("#181825"))
         self._picks.clear()
 
         if checked:
@@ -281,23 +320,22 @@ class OpenLibraryDialog(QDialog):
                 cell = self.tbl.item(row, logical + 1)
                 val = cell.text().strip() if cell else ''
                 if val:
-                    self._picks[logical] = (row, val)
+                    self._picks[logical] = (cell, val)
                     cell.setBackground(QColor(CELL_PICKED))
-            data = self._covers.get(row)
+            data = self._covers.get(self._result_index(row))
             if data:
                 self._cover_pick = data
                 self._update_cover_preview(data)
                 self.cover_preview.setStyleSheet("border:2px solid #a6e3a1; border-radius:4px;")
-                self.cover_status.setText(f"✔ Cover from row {row+1} will be applied")
+                self.cover_status.setText("✔ This row's cover will be applied")
         else:
             self._cover_pick = None
             self.cover_preview.setStyleSheet(f"border:2px solid #313244; border-radius:4px; color:{GRAY};")
         self._update_picks_label()
 
     def _clear_picks(self):
-        for logical, (row, _) in self._picks.items():
-            item = self.tbl.item(row, logical + 1)
-            if item: item.setBackground(QColor("#181825"))
+        for logical, (it, _) in self._picks.items():
+            if it is not None: it.setBackground(QColor("#181825"))
         self._picks.clear(); self._cover_pick = None
         self._filling = True
         for r in range(self.tbl.rowCount()):
@@ -311,8 +349,8 @@ class OpenLibraryDialog(QDialog):
         parts = []
         for col in range(len(COL_NAMES)):
             if col in self._picks:
-                row, val = self._picks[col]
-                parts.append(f"{COL_NAMES[col]}: '{val[:28]}' (row {row+1})")
+                _, val = self._picks[col]
+                parts.append(f"{COL_NAMES[col]}: '{val[:28]}'")
         if self._cover_pick: parts.append("Cover: ✔ picked")
         if parts: self.picks_lbl.setText("Will apply: " + "  |  ".join(parts))
         else: self.picks_lbl.setText("No fields picked yet — double-click cells above")

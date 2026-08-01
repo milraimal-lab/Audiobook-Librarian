@@ -1,7 +1,18 @@
 """Pure helpers: title parsing, filename sanitizing, ffmetadata escaping,
 human-readable size/duration formatting."""
 from util import (parse_audiobook_title, parse_series_group, _sanitize, _ffesc,
-                  fmt_size, fmt_duration, norm_series_num)
+                  fmt_size, fmt_duration, norm_series_num, cover_key)
+
+
+def test_cover_key_none_is_empty():
+    assert cover_key(None) == ''
+    assert cover_key(b'') == ''
+
+def test_cover_key_same_bytes_same_key():
+    assert cover_key(b'JPEGDATA') == cover_key(b'JPEGDATA')
+
+def test_cover_key_differs_for_different_covers():
+    assert cover_key(b'coverA') != cover_key(b'coverB')
 
 
 def test_norm_series_num_strips_zero_decimal():

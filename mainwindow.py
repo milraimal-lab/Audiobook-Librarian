@@ -27,7 +27,7 @@ import organizer as org
 
 from constants import *
 from util import (_load_settings, _save_settings, log_line, LOG_PATH,
-                  send_to_recycle_bin, find_ffmpeg, fmt_size, fmt_duration)
+                  send_to_recycle_bin, find_ffmpeg, fmt_size, fmt_duration, cover_key)
 from workers import (ScanThread, HydrateThread, SaveThread, DupCheckThread,
                      OrganizeThread, M4bThread)
 from booktree import BookTreeWidget, _book_misplacement
@@ -384,6 +384,7 @@ class MainWindow(QMainWindow):
         self.files_tab.split_requested.connect(self._split_files_to_new_book)
         self.files_tab.split_each_requested.connect(self._split_files_each_to_own_book)
         self.files_tab.autosplit_requested.connect(self._autosplit_book)
+        self.files_tab.autosplit_cover_requested.connect(self._autosplit_by_cover)
         self.tabs.addTab(self.files_tab, "Files")
 
         self.move_tab = MoveOrganiseTab()
@@ -1124,6 +1125,57 @@ class MainWindow(QMainWindow):
             else self.import_tree.select_book(book)
         self._set_status(
             f"Auto-split into {len(groups)} books ✓ — check them, then Save All Tags.")
+
+    def _autosplit_by_cover(self, book: Optional[sc.Book]):
+        """Split one book into several by the cover art each file carries."""
+        if not book or book.file_count < 2:
+            QMessageBox.information(self, "Auto-Split by Cover",
+                "Select a book with several files first.")
+            return
+        for af in book.files:
+            if not af.hydrated:
+                t = tg.read_tags(af.path); t.pop('_error', None)
+                af.tags = t
+                af.duration = float(t.get('duration', 0) or 0)
+                af.hydrated = True
+
+        groups: dict = {}; order: list = []
+        for af in book.files:
+            k = cover_key(af.tags.get('cover_art'))
+            if k not in groups:
+                groups[k] = []; order.append(k)
+            groups[k].append(af)
+        if len(groups) < 2:
+            QMessageBox.information(self, "Auto-Split by Cover",
+                "All files share the same cover (or none carry one) — nothing to "
+                "split by. Try 'Auto-split by album tag', or select rows and split "
+                "them manually.")
+            return
+
+        lines = "\n".join(
+            (f"  •  Cover {i}   ({len(groups[k])} file(s))" if k
+             else f"  •  No cover   ({len(groups[k])} file(s))")
+            for i, k in enumerate(order, 1))
+        ans = QMessageBox.question(self, "Auto-Split by Cover",
+            f"Split '{book.display_name}' into {len(groups)} books by cover art?\n\n"
+            f"{lines}\n\nEach keeps its own files' tags; nothing is saved until you Save.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if ans != QMessageBox.StandardButton.Yes: return
+
+        lst = self.books if book in self.books else self.import_books
+        # original book keeps the first cover group
+        first_files = groups[order[0]]
+        book.files = first_files
+        t0 = first_files[0].tags or {}
+        book.cover_art = t0.get('cover_art') or book.cover_art
+        book.modified = True
+        for k in order[1:]:
+            lst.append(self._new_book_from(book, groups[k]))
+
+        self._populate_both_trees(keep_expanded=True)
+        (self.book_tree if book in self.books else self.import_tree).select_book(book)
+        self._set_status(
+            f"Auto-split into {len(groups)} books by cover ✓ — check them, then Save All Tags.")
 
     def _show_m4b_options(self, ok_label: str) -> bool:
         """Open the M4B options dialog, persist any changes. Returns True on OK."""

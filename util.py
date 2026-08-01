@@ -96,6 +96,14 @@ def send_to_recycle_bin(paths: list) -> bool:
     res = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op))
     return res == 0 and not op.fAnyOperationsAborted
 
+def cover_key(data) -> str:
+    """Stable identity for a piece of cover art (md5 of its bytes); '' when
+    there's no cover. Used to group files by which cover they carry."""
+    if not data:
+        return ''
+    import hashlib
+    return hashlib.md5(bytes(data)).hexdigest()
+
 def norm_series_num(num) -> str:
     """Drop a trailing all-zero decimal from a series index so whole numbers
     don't carry a pointless '.0':
