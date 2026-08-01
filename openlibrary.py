@@ -29,7 +29,7 @@ def _split_series(raw: str) -> tuple:
     return raw.strip(), ''
 
 
-def search_books(query: str, limit: int = 15) -> list:
+def search_books(query: str, limit: int = 25) -> list:
     params = {
         'q':      query,
         'fields': ('key,title,author_name,first_publish_year,'

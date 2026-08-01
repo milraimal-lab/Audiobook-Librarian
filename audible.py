@@ -18,7 +18,7 @@ def _strip_html(text: str) -> str:
     return re.sub(r'<[^>]+>', '', text or '').strip()
 
 
-def search_books(query: str, limit: int = 15) -> list:
+def search_books(query: str, limit: int = 25) -> list:
     params = {
         'keywords':         query,
         'num_results':      limit,
