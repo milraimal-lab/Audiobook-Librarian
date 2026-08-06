@@ -62,7 +62,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='AudiobookLibrarian',
+    name='Libwright',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

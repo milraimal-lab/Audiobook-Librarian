@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Audiobook Librarian — entry point.
+"""Libwright — entry point.
 
 A PyQt6 audiobook library manager: scan, tag, organize, merge/split,
 deduplicate, repair, and build M4Bs.

@@ -1,5 +1,5 @@
 @echo off
-title Build AudiobookLibrarian.exe
+title Build Libwright.exe
 cd /d "%~dp0"
 
 echo === Checking / installing PyInstaller ===
@@ -15,8 +15,8 @@ if errorlevel 1 (
 )
 
 echo.
-echo === Building AudiobookLibrarian.exe ===
-pyinstaller --clean AudiobookLibrarian.spec
+echo === Building Libwright.exe ===
+pyinstaller --clean Libwright.spec
 
 if errorlevel 1 (
     echo.
@@ -49,7 +49,7 @@ echo ffmpeg.exe is in dist\ - Build M4B works out of the box.
 :ffmpeg_end
 echo.
 echo === Done! ===
-echo The exe is at:  dist\AudiobookLibrarian.exe
+echo The exe is at:  dist\Libwright.exe
 echo (keep ffmpeg.exe next to it for Build M4B)
 echo.
 pause

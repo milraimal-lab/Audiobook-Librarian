@@ -1,5 +1,8 @@
-# Audiobook Librarian
+# Libwright
 (Warning: Vibe Coded)
+
+*Lib(rary) + -wright: one who builds and mends audiobook libraries — a desktop
+tool for tagging, organizing, and cleaning up a messy collection.*
 A Windows desktop app for wrangling a messy audiobook collection into a clean,
 tagged, consistently-organized library. Built with PyQt6 + mutagen.
 
@@ -50,11 +53,11 @@ Build M4B and Repair.
 build.bat
 ```
 
-Produces `dist\AudiobookLibrarian.exe` and bundles `ffmpeg.exe` beside it
+Produces `dist\Libwright.exe` and bundles `ffmpeg.exe` beside it
 (copied from PATH or downloaded on first build). Ship the two files together.
 
 Prefer a prebuilt binary? Download the latest from the
-[**Releases**](https://github.com/milraimal-lab/Audiobook-Librarian/releases/latest) page.
+[**Releases**](https://github.com/milraimal-lab/Libwright/releases/latest) page.
 
 ## Tests
 
